@@ -72,7 +72,6 @@ with engine.begin() as conn:
             valor REAL
         )
     '''))
-    # Atualizações de tabelas existentes (Garante que as colunas novas são criadas)
     conn.execute(text("ALTER TABLE entregas ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'Ativo';"))
     conn.execute(text("ALTER TABLE devolucoes ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'Ativo';"))
     conn.execute(text("ALTER TABLE cargas ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'Ativo';"))
@@ -224,7 +223,7 @@ def cadastrar_bairro(nome):
         '''), {"nome": nome_limpo})
     
     novos_bairros = listar_bairros()
-    return carregar_tabela('bairros'), "✅ Bairro cadastrado com sucesso!", gr.update(choices=novos_bairros), gr.update(choices=novos_bairros), gr.update(choices=["Todos"] + novos_bairros)
+    return carregar_tabela('bairros'), "✅ Bairro cadastrado com sucesso!", gr.update(choices=novos_bairros), gr.update(choices=novos_bairros)
 
 def registrar_financeiro(descricao, tipo, valor):
     data = obter_data_hoje()
@@ -257,84 +256,135 @@ def cancelar_devolucao(id_registro):
         conn.execute(text("UPDATE devolucoes SET status = 'Cancelado' WHERE id = :id"), {"id": int(id_registro)})
     return carregar_tabela('devolucoes'), f"⚠️ Devolução #{id_registro} marcada como Cancelada.", calcular_kpis()
 
-def filtrar_dados(motorista_filtro, bairro_filtro, data_filtro):
-    query = "SELECT * FROM entregas WHERE status != 'Cancelado'"
+# 6. Unificação e Exportação (O GRANDE AJUSTE)
+def obter_dados_unificados(motorista_filtro, data_filtro):
+    cond = "status != 'Cancelado'"
     params = {}
-    
     if motorista_filtro and motorista_filtro != "Todos":
-        query += " AND motorista ILIKE :mot" 
-        params["mot"] = f"%{motorista_filtro}%"
-    if bairro_filtro and bairro_filtro != "Todos":
-        query += " AND bairro ILIKE :bai"
-        params["bai"] = f"%{bairro_filtro}%"
+        cond += " AND motorista ILIKE :mot"
+        params['mot'] = f"%{motorista_filtro}%"
     if data_filtro:
-        query += " AND data LIKE :data"
-        params["data"] = f"%{data_filtro}%"
-        
-    df_filtrado = pd.read_sql_query(text(query), engine, params=params)
-    
-    total_pacotes = df_filtrado["pacotes"].sum() if not df_filtrado.empty else 0
-    total_pago = df_filtrado["total"].sum() if not df_filtrado.empty else 0
-    
-    resumo = f"Filtro Aplicado: {total_pacotes} Pacotes Entregues | Repasse Total: R$ {total_pago:.2f}"
-    return df_filtrado, resumo
+        cond += " AND data LIKE :data"
+        params['data'] = f"%{data_filtro}%"
 
-# 6. Exportação e Fechamento WhatsApp
-def exportar_excel(motorista_filtro, bairro_filtro, data_filtro):
-    df_filtrado, _ = filtrar_dados(motorista_filtro, bairro_filtro, data_filtro)
-    caminho = "relatorio_entregas.xlsx"
-    df_filtrado.to_excel(caminho, index=False)
+    # Busca as três bases de dados
+    df_c = pd.read_sql_query(text(f"SELECT data, motorista, rota as bairro, pacotes, '1 - Carga (Saída)' as tipo FROM cargas WHERE {cond}"), engine, params=params)
+    df_e = pd.read_sql_query(text(f"SELECT data, motorista, bairro, pacotes, total, '2 - Entrega' as tipo FROM entregas WHERE {cond}"), engine, params=params)
+    df_d = pd.read_sql_query(text(f"SELECT data, motorista, bairro, pacotes, motivo, '3 - Devolução' as tipo FROM devolucoes WHERE {cond}"), engine, params=params)
+
+    # --- TABELA 1: DETALHADA UNIFICADA (Tudo na mesma lista) ---
+    list_dfs = []
+    if not df_c.empty:
+        temp_c = df_c.copy()
+        temp_c['detalhe'] = ""
+        list_dfs.append(temp_c[['data', 'motorista', 'tipo', 'bairro', 'pacotes', 'detalhe']])
+    if not df_e.empty:
+        temp_e = df_e.copy()
+        temp_e['detalhe'] = "R$ " + temp_e['total'].astype(str)
+        list_dfs.append(temp_e[['data', 'motorista', 'tipo', 'bairro', 'pacotes', 'detalhe']])
+    if not df_d.empty:
+        temp_d = df_d.copy()
+        temp_d['detalhe'] = temp_d['motivo']
+        list_dfs.append(temp_d[['data', 'motorista', 'tipo', 'bairro', 'pacotes', 'detalhe']])
+        
+    if list_dfs:
+        df_uni = pd.concat(list_dfs, ignore_index=True)
+        df_uni.sort_values(by=['data', 'motorista', 'tipo'], inplace=True)
+        df_uni.columns = ['Data', 'Motorista', 'Operação', 'Bairro/Rota', 'Pacotes', 'Info Adicional']
+    else:
+        df_uni = pd.DataFrame(columns=['Data', 'Motorista', 'Operação', 'Bairro/Rota', 'Pacotes', 'Info Adicional'])
+
+    # --- TABELA 2: RESUMO CONSOLIDADO (Saiu, Entregue, Devolvido na mesma linha) ---
+    g_c = df_c.groupby(['data', 'motorista'], as_index=False)['pacotes'].sum() if not df_c.empty else pd.DataFrame(columns=['data', 'motorista', 'pacotes'])
+    g_e = df_e.groupby(['data', 'motorista'], as_index=False)[['pacotes', 'total']].sum() if not df_e.empty else pd.DataFrame(columns=['data', 'motorista', 'pacotes', 'total'])
+    g_d = df_d.groupby(['data', 'motorista'], as_index=False)['pacotes'].sum() if not df_d.empty else pd.DataFrame(columns=['data', 'motorista', 'pacotes'])
+
+    dfs_keys = []
+    if not g_c.empty: dfs_keys.append(g_c[['data', 'motorista']])
+    if not g_e.empty: dfs_keys.append(g_e[['data', 'motorista']])
+    if not g_d.empty: dfs_keys.append(g_d[['data', 'motorista']])
+    
+    if not dfs_keys:
+        df_resumo = pd.DataFrame(columns=['Data', 'Motorista', 'Saiu (Carga)', 'Entregues', 'Devolvidos', 'Pendentes', 'Repasse Total (R$)'])
+    else:
+        df_resumo = pd.concat(dfs_keys).drop_duplicates()
+        
+        # Junta todas as contas na mesma linha
+        if not g_c.empty: df_resumo = pd.merge(df_resumo, g_c.rename(columns={'pacotes':'saida'}), on=['data', 'motorista'], how='left')
+        else: df_resumo['saida'] = 0
+        
+        if not g_e.empty: df_resumo = pd.merge(df_resumo, g_e.rename(columns={'pacotes':'entregues', 'total':'repasse'}), on=['data', 'motorista'], how='left')
+        else: 
+            df_resumo['entregues'] = 0
+            df_resumo['repasse'] = 0
+            
+        if not g_d.empty: df_resumo = pd.merge(df_resumo, g_d.rename(columns={'pacotes':'devolvidos'}), on=['data', 'motorista'], how='left')
+        else: df_resumo['devolvidos'] = 0
+
+        df_resumo.fillna(0, inplace=True)
+        df_resumo['pendentes'] = df_resumo['saida'] - (df_resumo['entregues'] + df_resumo['devolvidos'])
+        
+        df_resumo.rename(columns={
+            'data': 'Data',
+            'motorista': 'Motorista',
+            'saida': 'Saiu (Carga)',
+            'entregues': 'Entregues',
+            'devolvidos': 'Devolvidos',
+            'pendentes': 'Pendentes',
+            'repasse': 'Repasse Total (R$)'
+        }, inplace=True)
+
+    # Texto de resumo
+    total_ent = df_resumo['Entregues'].sum() if not df_resumo.empty else 0
+    total_dev = df_resumo['Devolvidos'].sum() if not df_resumo.empty else 0
+    total_rep = df_resumo['Repasse Total (R$)'].sum() if not df_resumo.empty else 0.0
+    texto_resumo = f"Resumo Global do Filtro: {total_ent} Entregues | {total_dev} Devolvidos | Repasse Total R$ {total_rep:.2f}"
+    
+    return df_resumo, df_uni, texto_resumo
+
+def exportar_excel_resumo(motorista_filtro, data_filtro):
+    df_resumo, _, _ = obter_dados_unificados(motorista_filtro, data_filtro)
+    caminho = "fechamento_consolidado.xlsx"
+    df_resumo.to_excel(caminho, index=False)
     return caminho
 
-def exportar_csv(motorista_filtro, bairro_filtro, data_filtro):
-    df_filtrado, _ = filtrar_dados(motorista_filtro, bairro_filtro, data_filtro)
-    caminho = "relatorio_entregas.csv"
-    df_filtrado.to_csv(caminho, index=False, encoding="utf-8-sig")
+def exportar_excel_detalhado(motorista_filtro, data_filtro):
+    _, df_uni, _ = obter_dados_unificados(motorista_filtro, data_filtro)
+    caminho = "historico_detalhado.xlsx"
+    df_uni.to_excel(caminho, index=False)
     return caminho
 
 def gerar_comprovante_whatsapp(motorista_nome, data_consulta):
     if not motorista_nome or motorista_nome == "Todos":
         return "Selecione um motorista específico para gerar o fechamento."
-    
     if not data_consulta:
         data_consulta = obter_data_hoje()
         
-    # Busca Carga Inicial (Saída)
-    query_carga = "SELECT pacotes, rota FROM cargas WHERE status != 'Cancelado' AND motorista = :mot AND data LIKE :data"
-    df_c = pd.read_sql_query(text(query_carga), engine, params={"mot": motorista_nome, "data": f"%{data_consulta}%"})
-    total_saida = df_c['pacotes'].sum() if not df_c.empty else 0
+    df_resumo, _, _ = obter_dados_unificados(motorista_nome, data_consulta)
     
-    # Extrai rotas para texto
-    rotas = [str(r) for r in df_c['rota'].dropna().unique() if str(r).strip() != ""]
-    texto_rotas = " / ".join(rotas) if rotas else "Não especificada"
+    if df_resumo.empty:
+        return f"Nenhuma movimentação encontrada para {motorista_nome} na data {data_consulta}."
 
-    # Busca Entregas
-    df_entregas, _ = filtrar_dados(motorista_nome, "Todos", data_consulta)
-    total_entregue = df_entregas['pacotes'].sum() if not df_entregas.empty else 0
-    total_repasse = df_entregas['total'].sum() if not df_entregas.empty else 0.0
-
-    # Busca Devoluções
-    query_dev = "SELECT pacotes FROM devolucoes WHERE status != 'Cancelado' AND motorista = :mot AND data LIKE :data"
-    df_dev = pd.read_sql_query(text(query_dev), engine, params={"mot": motorista_nome, "data": f"%{data_consulta}%"})
-    total_devolucoes = df_dev['pacotes'].sum() if not df_dev.empty else 0
+    total_saida = df_resumo['Saiu (Carga)'].sum()
+    total_entregue = df_resumo['Entregues'].sum()
+    total_devolucoes = df_resumo['Devolvidos'].sum()
+    pendentes = df_resumo['Pendentes'].sum()
+    total_repasse = df_resumo['Repasse Total (R$)'].sum()
     
-    # Calcula Pendência/Divergência
-    pendentes = total_saida - (total_entregue + total_devolucoes)
-    status_balanco = "✅ Fechamento OK" if pendentes == 0 else f"⚠️ Divergência de {pendentes} pacote(s)"
+    status_balanco = "✅ Fechamento OK" if pendentes == 0 else f"⚠️ Divergência de {int(pendentes)} pacote(s)"
     if total_saida == 0:
         status_balanco = "ℹ️ Carga Inicial não registada no sistema"
 
-    df_mot = pd.read_sql_query(text("SELECT chave_pix, telefone FROM motoristas WHERE nome = :nome"), engine, params={"nome": motorista_nome})
+    df_mot = pd.read_sql_query(text("SELECT chave_pix FROM motoristas WHERE nome = :nome"), engine, params={"nome": motorista_nome})
     chave_pix = df_mot['chave_pix'].iloc[0] if not df_mot.empty else "Não cadastrada"
     
     texto_whatsapp = f"""📲 *FECHAMENTO DE ROTA DE ENTREGA*
 👤 *Motorista:* {motorista_nome}
 📅 *Data:* {data_consulta}
-🗺️ *Rota(s):* {texto_rotas}
 
-📦 *Carga Inicial (Saída):* {total_saida} pacotes
-✅ *Pacotes Entregues:* {total_entregue} pacotes
-🔄 *Pacotes Devolvidos:* {total_devolucoes} pacotes
+📦 *Carga Inicial (Saída):* {int(total_saida)} pacotes
+✅ *Pacotes Entregues:* {int(total_entregue)} pacotes
+🔄 *Pacotes Devolvidos:* {int(total_devolucoes)} pacotes
 ⚖️ *Status do Balanço:* {status_balanco}
 
 💰 *Valor Total Repasse:* R$ {total_repasse:.2f}
@@ -417,17 +467,19 @@ with gr.Blocks(theme=gr.themes.Soft()) as app:
         with gr.Row():
             filtro_data = gr.Textbox(label="Data (DD/MM/AAAA)")
             filtro_mot = gr.Dropdown(choices=["Todos"] + listar_motoristas(), value="Todos", label="Motorista")
-            filtro_bairro = gr.Dropdown(choices=["Todos"] + listar_bairros(), value="Todos", label="Bairro")
         
         with gr.Row():
             btn_hoje = gr.Button("📅 Data de Hoje", variant="secondary")
             btn_mes = gr.Button("📅 Mês Atual", variant="secondary")
-            btn_filtrar = gr.Button("🔍 Aplicar Filtros", variant="primary")
+            btn_filtrar = gr.Button("🔍 Gerar Fechamento Consolidado", variant="primary")
             
-        resumo_filtro = gr.Textbox(label="Resumo do Filtro", interactive=False)
-        tabela_filtrada = gr.Dataframe(label="Resultados", interactive=False)
+        resumo_filtro = gr.Textbox(label="Resultado", interactive=False)
         
-        gr.Markdown("### 📈 Volume de Pacotes por Bairro")
+        # As duas novas tabelas unificadas
+        tabela_resumo = gr.Dataframe(label="📊 Resumo Consolidado (Tudo na mesma linha)", interactive=False)
+        tabela_detalhada = gr.Dataframe(label="📝 Histórico Detalhado Unificado", interactive=False)
+        
+        gr.Markdown("### 📈 Volume de Pacotes por Bairro (Apenas Sucessos)")
         grafico_out = gr.BarPlot(
             value=gerar_grafico_bairros(),
             x="bairro",
@@ -437,19 +489,21 @@ with gr.Blocks(theme=gr.themes.Soft()) as app:
             height=300
         )
         
+        # Botões de Excel novos
         with gr.Row():
-            btn_exportar_excel = gr.Button("📊 Baixar Excel (.xlsx)")
-            btn_exportar_csv = gr.Button("📄 Baixar CSV (.csv)")
-            btn_wa = gr.Button("📲 Gerar Fechamento de Rota (WhatsApp)", variant="secondary")
+            btn_exportar_excel_r = gr.Button("📊 Baixar Fechamento Consolidado (.xlsx)")
+            btn_exportar_excel_d = gr.Button("📊 Baixar Histórico Detalhado (.xlsx)")
+            btn_wa = gr.Button("📲 Gerar Resumo WhatsApp", variant="secondary")
             
         arquivo_download = gr.File(label="Ficheiro Gerado")
         texto_wa_out = gr.TextArea(label="Demonstrativo / Prestação de Contas WhatsApp", interactive=False)
         
         btn_hoje.click(obter_data_hoje, outputs=[filtro_data])
         btn_mes.click(obter_mes_atual, outputs=[filtro_data])
-        btn_filtrar.click(filtrar_dados, inputs=[filtro_mot, filtro_bairro, filtro_data], outputs=[tabela_filtrada, resumo_filtro])
-        btn_exportar_excel.click(exportar_excel, inputs=[filtro_mot, filtro_bairro, filtro_data], outputs=[arquivo_download])
-        btn_exportar_csv.click(exportar_csv, inputs=[filtro_mot, filtro_bairro, filtro_data], outputs=[arquivo_download])
+        btn_filtrar.click(obter_dados_unificados, inputs=[filtro_mot, filtro_data], outputs=[tabela_resumo, tabela_detalhada, resumo_filtro])
+        
+        btn_exportar_excel_r.click(exportar_excel_resumo, inputs=[filtro_mot, filtro_data], outputs=[arquivo_download])
+        btn_exportar_excel_d.click(exportar_excel_detalhado, inputs=[filtro_mot, filtro_data], outputs=[arquivo_download])
         btn_wa.click(gerar_comprovante_whatsapp, inputs=[filtro_mot, filtro_data], outputs=[texto_wa_out])
 
     with gr.Tab("Cadastro de Motoristas"):
@@ -472,7 +526,7 @@ with gr.Blocks(theme=gr.themes.Soft()) as app:
         msg_bairro = gr.Textbox(label="Status", interactive=False)
         tabela_bairros = gr.Dataframe(value=carregar_tabela('bairros'), interactive=False, label="Bairros Cadastrados")
         
-        btn_bairro.click(cadastrar_bairro, inputs=[nome_bairro_in], outputs=[tabela_bairros, msg_bairro, bairro_in, bairro_dev_in, filtro_bairro])
+        btn_bairro.click(cadastrar_bairro, inputs=[nome_bairro_in], outputs=[tabela_bairros, msg_bairro, bairro_in, bairro_dev_in])
 
     with gr.Tab("Financeiro"):
         with gr.Row():
