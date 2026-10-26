@@ -327,4 +327,158 @@ def gerar_comprovante_whatsapp(motorista_nome, data_consulta):
 📦 *Carga Inicial (Saída):* {total_saida} pacotes
 ✅ *Pacotes Entregues:* {total_entregue} pacotes
 🔄 *Pacotes Devolvidos:* {total_devolucoes} pacotes
-⚖️ *
+⚖️ *Status do Balanço:* {status_balanco}
+
+💰 *Valor Total Repasse:* R$ {total_repasse:.2f}
+🔑 *Chave PIX:* {chave_pix}
+
+_Conferido pelo Sistema SanNovas._"""
+    return texto_whatsapp
+
+# 7. Interface Gráfica (Gradio)
+with gr.Blocks(theme=gr.themes.Soft()) as app:
+    gr.Markdown("# 📦 SanNovas - Controle")
+    
+    kpi_box = gr.Markdown(value=calcular_kpis())
+    
+    with gr.Tab("Carga Inicial (Romaneio)"):
+        gr.Markdown("### 🚚 Registrar Saída de Carga do Galpão")
+        with gr.Row():
+            data_carga_in = gr.Textbox(label="Data (DD/MM/AAAA) - Vazio para hoje")
+            motorista_carga_in = gr.Dropdown(choices=listar_motoristas(), label="Motorista")
+            pacotes_carga_in = gr.Number(label="Quantidade Total de Pacotes na Saída", value=1, minimum=1)
+        
+        btn_carga = gr.Button("Registrar Saída de Carga", variant="primary")
+        msg_carga = gr.Textbox(label="Status", interactive=False)
+        tabela_cargas = gr.Dataframe(value=carregar_tabela('cargas'), interactive=False, label="Histórico de Saídas")
+        
+        with gr.Row():
+            id_cancelar_carga_in = gr.Number(label="ID do Registro de Carga para Cancelar", precision=0)
+            btn_cancelar_carga = gr.Button("⚠️ Cancelar Carga por ID", variant="stop")
+            
+        btn_carga.click(registrar_carga, inputs=[data_carga_in, motorista_carga_in, pacotes_carga_in], outputs=[tabela_cargas, msg_carga, kpi_box])
+        btn_cancelar_carga.click(cancelar_carga, inputs=[id_cancelar_carga_in], outputs=[tabela_cargas, msg_carga, kpi_box])
+
+    with gr.Tab("Controle de Entregas"):
+        with gr.Row():
+            data_in = gr.Textbox(label="Data (DD/MM/AAAA) - Vazio para hoje")
+            motorista_in = gr.Dropdown(choices=listar_motoristas(), label="Motorista")
+            bairro_in = gr.Dropdown(choices=listar_bairros(), label="Bairro")
+        with gr.Row():
+            pacotes_in = gr.Number(label="Quantidade de Pacotes Entregues", value=1, minimum=1)
+            valor_in = gr.Number(label="Valor por Pacote (R$)", value=0.0)
+        
+        btn_entrega = gr.Button("Salvar Registro de Entrega", variant="primary")
+        msg_entrega = gr.Textbox(label="Status", interactive=False)
+        tabela_entregas = gr.Dataframe(value=carregar_tabela('entregas'), interactive=False, label="Histórico de Entregas")
+        
+        with gr.Row():
+            id_cancelar_in = gr.Number(label="ID do Registro para Cancelar", precision=0)
+            btn_cancelar = gr.Button("⚠️ Cancelar Entrega por ID", variant="stop")
+            
+        btn_entrega.click(registrar_entrega, inputs=[data_in, motorista_in, bairro_in, pacotes_in, valor_in], outputs=[tabela_entregas, msg_entrega, kpi_box, gr.BarPlot()])
+        btn_cancelar.click(cancelar_registro, inputs=[id_cancelar_in], outputs=[tabela_entregas, msg_entrega, kpi_box, gr.BarPlot()])
+
+    with gr.Tab("Controle de Devoluções"):
+        with gr.Row():
+            data_dev_in = gr.Textbox(label="Data (DD/MM/AAAA) - Vazio para hoje")
+            motorista_dev_in = gr.Dropdown(choices=listar_motoristas(), label="Motorista")
+            bairro_dev_in = gr.Dropdown(choices=listar_bairros(), label="Bairro")
+        with gr.Row():
+            pacotes_dev_in = gr.Number(label="Quantidade Devolvida", value=1, minimum=1)
+            motivo_dev_in = gr.Dropdown(
+                choices=["Cliente Ausente", "Endereço Não Encontrado", "Recusado pelo Cliente", "Endereço Incompleto", "Outros"],
+                value="Cliente Ausente",
+                label="Motivo da Devolução"
+            )
+        
+        btn_devolucao = gr.Button("Registrar Devolução", variant="primary")
+        msg_devolucao = gr.Textbox(label="Status", interactive=False)
+        tabela_devolucoes = gr.Dataframe(value=carregar_tabela('devolucoes'), interactive=False, label="Histórico de Devoluções")
+        
+        with gr.Row():
+            id_cancelar_dev_in = gr.Number(label="ID da Devolução para Cancelar", precision=0)
+            btn_cancelar_dev = gr.Button("⚠️ Cancelar Devolução por ID", variant="stop")
+            
+        btn_devolucao.click(registrar_devolucao, inputs=[data_dev_in, motorista_dev_in, bairro_dev_in, pacotes_dev_in, motivo_dev_in], outputs=[tabela_devolucoes, msg_devolucao, kpi_box])
+        btn_cancelar_dev.click(cancelar_devolucao, inputs=[id_cancelar_dev_in], outputs=[tabela_devolucoes, msg_devolucao, kpi_box])
+
+    with gr.Tab("Relatórios & Fechamento"):
+        with gr.Row():
+            filtro_data = gr.Textbox(label="Data (DD/MM/AAAA)")
+            filtro_mot = gr.Dropdown(choices=["Todos"] + listar_motoristas(), value="Todos", label="Motorista")
+            filtro_bairro = gr.Dropdown(choices=["Todos"] + listar_bairros(), value="Todos", label="Bairro")
+        
+        with gr.Row():
+            btn_hoje = gr.Button("📅 Data de Hoje", variant="secondary")
+            btn_mes = gr.Button("📅 Mês Atual", variant="secondary")
+            btn_filtrar = gr.Button("🔍 Aplicar Filtros", variant="primary")
+            
+        resumo_filtro = gr.Textbox(label="Resumo do Filtro", interactive=False)
+        tabela_filtrada = gr.Dataframe(label="Resultados", interactive=False)
+        
+        gr.Markdown("### 📈 Volume de Pacotes por Bairro")
+        grafico_out = gr.BarPlot(
+            value=gerar_grafico_bairros(),
+            x="bairro",
+            y="pacotes",
+            title="Pacotes Entregues por Bairro",
+            tooltip=["bairro", "pacotes"],
+            height=300
+        )
+        
+        with gr.Row():
+            btn_exportar_excel = gr.Button("📊 Baixar Excel (.xlsx)")
+            btn_exportar_csv = gr.Button("📄 Baixar CSV (.csv)")
+            btn_wa = gr.Button("📲 Gerar Fechamento de Rota (WhatsApp)", variant="secondary")
+            
+        arquivo_download = gr.File(label="Arquivo Gerado")
+        texto_wa_out = gr.TextArea(label="Demonstrativo / Prestação de Contas WhatsApp", interactive=False)
+        
+        btn_hoje.click(obter_data_hoje, outputs=[filtro_data])
+        btn_mes.click(obter_mes_atual, outputs=[filtro_data])
+        btn_filtrar.click(filtrar_dados, inputs=[filtro_mot, filtro_bairro, filtro_data], outputs=[tabela_filtrada, resumo_filtro])
+        btn_exportar_excel.click(exportar_excel, inputs=[filtro_mot, filtro_bairro, filtro_data], outputs=[arquivo_download])
+        btn_exportar_csv.click(exportar_csv, inputs=[filtro_mot, filtro_bairro, filtro_data], outputs=[arquivo_download])
+        btn_wa.click(gerar_comprovante_whatsapp, inputs=[filtro_mot, filtro_data], outputs=[texto_wa_out])
+
+    with gr.Tab("Cadastro de Motoristas"):
+        with gr.Row():
+            nome_in = gr.Textbox(label="Nome Completo")
+            pix_in = gr.Textbox(label="Chave PIX")
+            tel_in = gr.Textbox(label="Telefone / WhatsApp")
+        
+        btn_mot = gr.Button("Cadastrar Motorista", variant="primary")
+        msg_mot = gr.Textbox(label="Status", interactive=False)
+        tabela_mot = gr.Dataframe(value=carregar_tabela('motoristas'), interactive=False, label="Motoristas Cadastrados")
+        
+        btn_mot.click(cadastrar_motorista, inputs=[nome_in, pix_in, tel_in], outputs=[tabela_mot, msg_mot, motorista_carga_in, motorista_in, motorista_dev_in, filtro_mot])
+
+    with gr.Tab("Cadastro de Bairros"):
+        with gr.Row():
+            nome_bairro_in = gr.Textbox(label="Nome do Bairro")
+        
+        btn_bairro = gr.Button("Cadastrar Bairro", variant="primary")
+        msg_bairro = gr.Textbox(label="Status", interactive=False)
+        tabela_bairros = gr.Dataframe(value=carregar_tabela('bairros'), interactive=False, label="Bairros Cadastrados")
+        
+        btn_bairro.click(cadastrar_bairro, inputs=[nome_bairro_in], outputs=[tabela_bairros, msg_bairro, bairro_in, bairro_dev_in, filtro_bairro])
+
+    with gr.Tab("Financeiro"):
+        with gr.Row():
+            desc_in = gr.Textbox(label="Descrição do Lançamento")
+            tipo_in = gr.Dropdown(choices=["Entrada", "Saída"], label="Tipo de Fluxo")
+            valor_fin_in = gr.Number(label="Valor (R$)", value=0.0)
+        
+        btn_fin = gr.Button("Salvar Lançamento", variant="primary")
+        msg_fin = gr.Textbox(label="Status", interactive=False)
+        tabela_fin = gr.Dataframe(value=carregar_tabela('financeiro'), interactive=False, label="Fluxo de Caixa")
+        
+        btn_fin.click(registrar_financeiro, inputs=[desc_in, tipo_in, valor_fin_in], outputs=[tabela_fin, msg_fin, kpi_box])
+
+# 8. Lançar a aplicação com Autenticação Nativa (Login/Senha)
+app.launch(
+    server_name="0.0.0.0", 
+    server_port=7860, 
+    auth=(USUARIO_ADMIN, SENHA_ADMIN)
+)
