@@ -4,13 +4,17 @@ import pandas as pd
 from sqlalchemy import create_engine, text
 from datetime import datetime
 
-# 1. Conexão Segura com o Supabase (Lê do Render ou usa fallback)
+# 1. Conexão Segura com o Supabase
 DEFAULT_DB_URL = "postgresql+psycopg2://postgres.hbwzwbgmgkbebxqzzboo:Sannovaslog2026@aws-1-us-west-2.pooler.supabase.com:6543/postgres"
 DATABASE_URL = os.environ.get("DATABASE_URL", DEFAULT_DB_URL)
 
 engine = create_engine(DATABASE_URL)
 
-# 2. Inicialização e Migração do Banco de Dados
+# 2. Configuração de Credenciais de Acesso (Login / Senha)
+USUARIO_ADMIN = os.environ.get("APP_USER", "admin")
+SENHA_ADMIN = os.environ.get("APP_PASS", "Sannovas2026!")
+
+# 3. Inicialização e Migração do Banco de Dados
 with engine.begin() as conn:
     conn.execute(text('''
         CREATE TABLE IF NOT EXISTS entregas (
@@ -41,10 +45,9 @@ with engine.begin() as conn:
             valor REAL
         )
     '''))
-    # Garante a coluna status em bancos criados anteriormente
     conn.execute(text("ALTER TABLE entregas ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'Ativo';"))
 
-# 3. Funções Auxiliares e Métricas (KPIs)
+# 4. Funções Auxiliares, KPIs e Gráficos
 def carregar_tabela(nome_tabela):
     return pd.read_sql_query(f"SELECT * FROM {nome_tabela} ORDER BY id DESC", engine)
 
@@ -60,7 +63,6 @@ def calcular_kpis():
     df_entregas = carregar_tabela('entregas')
     df_fin = carregar_tabela('financeiro')
     
-    # Filtra entregas ativas
     if not df_entregas.empty and 'status' in df_entregas.columns:
         df_entregas = df_entregas[df_entregas['status'] != 'Cancelado']
     
@@ -79,13 +81,31 @@ def calcular_kpis():
     """
     return kpi_texto
 
-# 4. Operações de Banco de Dados
+def gerar_grafico_bairros():
+    try:
+        df = carregar_tabela('entregas')
+        if df.empty or 'status' not in df.columns:
+            return pd.DataFrame({'bairro': [], 'pacotes': []})
+        df_ativa = df[df['status'] != 'Cancelado']
+        if df_ativa.empty:
+            return pd.DataFrame({'bairro': [], 'pacotes': []})
+        return df_ativa.groupby('bairro', as_index=False)['pacotes'].sum()
+    except:
+        return pd.DataFrame({'bairro': [], 'pacotes': []})
+
+def obter_data_hoje():
+    return datetime.now().strftime("%d/%m/%Y")
+
+def obter_mes_atual():
+    return datetime.now().strftime("/%m/%Y")
+
+# 5. Operações de Banco de Dados
 def registrar_entrega(data, motorista, bairro, pacotes, valor_pacote):
     if not motorista or motorista == "Nenhum motorista cadastrado":
-        return carregar_tabela('entregas'), "❌ Selecione ou cadastre um motorista válido!", calcular_kpis()
+        return carregar_tabela('entregas'), "❌ Selecione ou cadastre um motorista válido!", calcular_kpis(), gerar_grafico_bairros()
         
     if not data:
-        data = datetime.now().strftime("%d/%m/%Y")
+        data = obter_data_hoje()
     total = pacotes * valor_pacote
     
     with engine.begin() as conn:
@@ -94,7 +114,7 @@ def registrar_entrega(data, motorista, bairro, pacotes, valor_pacote):
             VALUES (:data, :mot, :bai, :pac, :val, :tot, 'Ativo')
         '''), {"data": data, "mot": motorista, "bai": bairro, "pac": pacotes, "val": valor_pacote, "tot": total})
     
-    return carregar_tabela('entregas'), f"✅ Salvo! Total Repasse: R$ {total:.2f}", calcular_kpis()
+    return carregar_tabela('entregas'), f"✅ Salvo! Total Repasse: R$ {total:.2f}", calcular_kpis(), gerar_grafico_bairros()
 
 def cadastrar_motorista(nome, pix, telefone):
     if not nome:
@@ -110,7 +130,7 @@ def cadastrar_motorista(nome, pix, telefone):
     return carregar_tabela('motoristas'), "✅ Motorista cadastrado com sucesso!", gr.update(choices=novos_motoristas)
 
 def registrar_financeiro(descricao, tipo, valor):
-    data = datetime.now().strftime("%d/%m/%Y")
+    data = obter_data_hoje()
     with engine.begin() as conn:
         conn.execute(text('''
             INSERT INTO financeiro (data, descricao, tipo, valor)
@@ -121,12 +141,12 @@ def registrar_financeiro(descricao, tipo, valor):
 
 def cancelar_registro(id_registro):
     if not id_registro:
-        return carregar_tabela('entregas'), "❌ Informe o ID da entrega!", calcular_kpis()
+        return carregar_tabela('entregas'), "❌ Informe o ID da entrega!", calcular_kpis(), gerar_grafico_bairros()
     
     with engine.begin() as conn:
         conn.execute(text("UPDATE entregas SET status = 'Cancelado' WHERE id = :id"), {"id": int(id_registro)})
     
-    return carregar_tabela('entregas'), f"⚠️ Registro #{id_registro} marcado como Cancelado.", calcular_kpis()
+    return carregar_tabela('entregas'), f"⚠️ Registro #{id_registro} marcado como Cancelado.", calcular_kpis(), gerar_grafico_bairros()
 
 def filtrar_dados(motorista_filtro, bairro_filtro, data_filtro):
     query = "SELECT * FROM entregas WHERE status != 'Cancelado'"
@@ -150,7 +170,7 @@ def filtrar_dados(motorista_filtro, bairro_filtro, data_filtro):
     resumo = f"Filtro Aplicado: {total_pacotes} Pacotes | Repasse Total: R$ {total_pago:.2f}"
     return df_filtrado, resumo
 
-# 5. Exportação e Gerador WhatsApp
+# 6. Exportação e WhatsApp
 def exportar_excel(motorista_filtro, bairro_filtro, data_filtro):
     df_filtrado, _ = filtrar_dados(motorista_filtro, bairro_filtro, data_filtro)
     caminho = "relatorio_entregas.xlsx"
@@ -168,11 +188,9 @@ def gerar_comprovante_whatsapp(motorista_nome, data_consulta):
         return "Selecione um motorista específico para gerar o comprovante."
     
     if not data_consulta:
-        data_consulta = datetime.now().strftime("%d/%m/%Y")
+        data_consulta = obter_data_hoje()
         
     df_entregas, _ = filtrar_dados(motorista_nome, "", data_consulta)
-    
-    # Busca dados do motorista
     df_mot = pd.read_sql_query(text("SELECT chave_pix, telefone FROM motoristas WHERE nome = :nome"), engine, params={"nome": motorista_nome})
     chave_pix = df_mot['chave_pix'].iloc[0] if not df_mot.empty else "Não cadastrada"
     
@@ -192,7 +210,7 @@ def gerar_comprovante_whatsapp(motorista_nome, data_consulta):
 _Conferido pelo Sistema Logístico._"""
     return texto_whatsapp
 
-# 6. Interface Gráfica (Gradio)
+# 7. Interface Gráfica (Gradio)
 with gr.Blocks(theme=gr.themes.Soft()) as app:
     gr.Markdown("# 📦 Sistema de Controle Logístico e Financeiro")
     
@@ -215,18 +233,32 @@ with gr.Blocks(theme=gr.themes.Soft()) as app:
             id_cancelar_in = gr.Number(label="ID do Registro para Cancelar", precision=0)
             btn_cancelar = gr.Button("⚠️ Cancelar Entrega por ID", variant="stop")
             
-        btn_entrega.click(registrar_entrega, inputs=[data_in, motorista_in, bairro_in, pacotes_in, valor_in], outputs=[tabela_entregas, msg_entrega, kpi_box])
-        btn_cancelar.click(cancelar_registro, inputs=[id_cancelar_in], outputs=[tabela_entregas, msg_entrega, kpi_box])
+        btn_entrega.click(registrar_entrega, inputs=[data_in, motorista_in, bairro_in, pacotes_in, valor_in], outputs=[tabela_entregas, msg_entrega, kpi_box, gr.BarPlot()])
+        btn_cancelar.click(cancelar_registro, inputs=[id_cancelar_in], outputs=[tabela_entregas, msg_entrega, kpi_box, gr.BarPlot()])
 
-    with gr.Tab("Relatórios & WhatsApp"):
+    with gr.Tab("Relatórios & Dashboard"):
         with gr.Row():
             filtro_data = gr.Textbox(label="Data (DD/MM/AAAA)")
             filtro_mot = gr.Dropdown(choices=["Todos"] + listar_motoristas(), value="Todos", label="Motorista")
             filtro_bairro = gr.Textbox(label="Bairro")
+        
+        with gr.Row():
+            btn_hoje = gr.Button("📅 Data de Hoje", variant="secondary")
+            btn_mes = gr.Button("📅 Mês Atual", variant="secondary")
+            btn_filtrar = gr.Button("🔍 Aplicar Filtros", variant="primary")
             
-        btn_filtrar = gr.Button("🔍 Aplicar Filtros", variant="primary")
         resumo_filtro = gr.Textbox(label="Resumo do Filtro", interactive=False)
         tabela_filtrada = gr.Dataframe(label="Resultados", interactive=False)
+        
+        gr.Markdown("### 📈 Volume de Pacotes por Bairro")
+        grafico_out = gr.BarPlot(
+            value=gerar_grafico_bairros(),
+            x="bairro",
+            y="pacotes",
+            title="Pacotes Entregues por Bairro",
+            tooltip=["bairro", "pacotes"],
+            height=300
+        )
         
         with gr.Row():
             btn_exportar_excel = gr.Button("📊 Baixar Excel (.xlsx)")
@@ -234,8 +266,10 @@ with gr.Blocks(theme=gr.themes.Soft()) as app:
             btn_wa = gr.Button("📲 Gerar Resumo para WhatsApp", variant="secondary")
             
         arquivo_download = gr.File(label="Arquivo Gerado")
-        texto_wa_out = gr.TextArea(label="Texto Prontinho para Copiar no WhatsApp", interactive=False)
+        texto_wa_out = gr.TextArea(label="Texto para WhatsApp", interactive=False)
         
+        btn_hoje.click(obter_data_hoje, outputs=[filtro_data])
+        btn_mes.click(obter_mes_atual, outputs=[filtro_data])
         btn_filtrar.click(filtrar_dados, inputs=[filtro_mot, filtro_bairro, filtro_data], outputs=[tabela_filtrada, resumo_filtro])
         btn_exportar_excel.click(exportar_excel, inputs=[filtro_mot, filtro_bairro, filtro_data], outputs=[arquivo_download])
         btn_exportar_csv.click(exportar_csv, inputs=[filtro_mot, filtro_bairro, filtro_data], outputs=[arquivo_download])
@@ -265,4 +299,9 @@ with gr.Blocks(theme=gr.themes.Soft()) as app:
         
         btn_fin.click(registrar_financeiro, inputs=[desc_in, tipo_in, valor_fin_in], outputs=[tabela_fin, msg_fin, kpi_box])
 
-app.launch(server_name="0.0.0.0", server_port=7860)
+# 8. Lançar a aplicação com Autenticação Nativa (Login/Senha)
+app.launch(
+    server_name="0.0.0.0", 
+    server_port=7860, 
+    auth=(USUARIO_ADMIN, SENHA_ADMIN)
+)
