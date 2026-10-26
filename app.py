@@ -77,7 +77,7 @@ with engine.begin() as conn:
     conn.execute(text("ALTER TABLE cargas ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'Ativo';"))
     conn.execute(text("ALTER TABLE cargas ADD COLUMN IF NOT EXISTS rota TEXT;"))
 
-# 4. Funções Auxiliares, KPIs e Gráficos
+# 4. Funções Auxiliares e KPIs
 def carregar_tabela(nome_tabela):
     return pd.read_sql_query(f"SELECT * FROM {nome_tabela} ORDER BY id DESC", engine)
 
@@ -213,7 +213,7 @@ def cadastrar_motorista(nome, pix, telefone):
 
 def cadastrar_bairro(nome):
     if not nome:
-        return carregar_tabela('bairros'), "❌ Informe o nome do bairro!", gr.update(), gr.update(), gr.update()
+        return carregar_tabela('bairros'), "❌ Informe o nome do bairro!", gr.update(), gr.update()
         
     nome_limpo = nome.strip()
     with engine.begin() as conn:
@@ -234,6 +234,31 @@ def registrar_financeiro(descricao, tipo, valor):
         '''), {"data": data, "desc": descricao, "tipo": tipo, "val": valor})
     
     return carregar_tabela('financeiro'), "✅ Lançamento salvo!", calcular_kpis()
+
+# --- MELHORIA 1: BOTÃO INTELIGENTE DE PAGAMENTO NO CAIXA ---
+def pagar_motorista_automatico(motorista_nome, data_consulta):
+    if not motorista_nome or motorista_nome == "Todos":
+        return "❌ Selecione um motorista específico para efetuar o pagamento."
+    if not data_consulta:
+        data_consulta = obter_data_hoje()
+        
+    df_resumo, _, _ = obter_dados_unificados(motorista_nome, data_consulta)
+    if df_resumo.empty:
+        return f"❌ Nenhuma entrega encontrada para {motorista_nome} na data {data_consulta}."
+        
+    total_repasse = float(df_resumo['Repasse Total (R$)'].sum())
+    if total_repasse <= 0:
+        return f"❌ O valor de repasse para {motorista_nome} nesta data é R$ 0.00."
+
+    descricao = f"Repasse Logístico - {motorista_nome} - {data_consulta}"
+    
+    with engine.begin() as conn:
+        conn.execute(text('''
+            INSERT INTO financeiro (data, descricao, tipo, valor)
+            VALUES (:data, :desc, 'Saída', :val)
+        '''), {"data": data_consulta, "desc": descricao, "val": total_repasse})
+        
+    return f"✅ Pagamento de R$ {total_repasse:.2f} registado com sucesso no Fluxo de Caixa!"
 
 def cancelar_carga(id_registro):
     if not id_registro:
@@ -256,7 +281,7 @@ def cancelar_devolucao(id_registro):
         conn.execute(text("UPDATE devolucoes SET status = 'Cancelado' WHERE id = :id"), {"id": int(id_registro)})
     return carregar_tabela('devolucoes'), f"⚠️ Devolução #{id_registro} marcada como Cancelada.", calcular_kpis()
 
-# 6. Unificação e Exportação (O GRANDE AJUSTE)
+# 6. Unificação e Exportações
 def obter_dados_unificados(motorista_filtro, data_filtro):
     cond = "status != 'Cancelado'"
     params = {}
@@ -267,12 +292,10 @@ def obter_dados_unificados(motorista_filtro, data_filtro):
         cond += " AND data LIKE :data"
         params['data'] = f"%{data_filtro}%"
 
-    # Busca as três bases de dados
     df_c = pd.read_sql_query(text(f"SELECT data, motorista, rota as bairro, pacotes, '1 - Carga (Saída)' as tipo FROM cargas WHERE {cond}"), engine, params=params)
     df_e = pd.read_sql_query(text(f"SELECT data, motorista, bairro, pacotes, total, '2 - Entrega' as tipo FROM entregas WHERE {cond}"), engine, params=params)
     df_d = pd.read_sql_query(text(f"SELECT data, motorista, bairro, pacotes, motivo, '3 - Devolução' as tipo FROM devolucoes WHERE {cond}"), engine, params=params)
 
-    # --- TABELA 1: DETALHADA UNIFICADA (Tudo na mesma lista) ---
     list_dfs = []
     if not df_c.empty:
         temp_c = df_c.copy()
@@ -294,7 +317,6 @@ def obter_dados_unificados(motorista_filtro, data_filtro):
     else:
         df_uni = pd.DataFrame(columns=['Data', 'Motorista', 'Operação', 'Bairro/Rota', 'Pacotes', 'Info Adicional'])
 
-    # --- TABELA 2: RESUMO CONSOLIDADO (Saiu, Entregue, Devolvido na mesma linha) ---
     g_c = df_c.groupby(['data', 'motorista'], as_index=False)['pacotes'].sum() if not df_c.empty else pd.DataFrame(columns=['data', 'motorista', 'pacotes'])
     g_e = df_e.groupby(['data', 'motorista'], as_index=False)[['pacotes', 'total']].sum() if not df_e.empty else pd.DataFrame(columns=['data', 'motorista', 'pacotes', 'total'])
     g_d = df_d.groupby(['data', 'motorista'], as_index=False)['pacotes'].sum() if not df_d.empty else pd.DataFrame(columns=['data', 'motorista', 'pacotes'])
@@ -308,8 +330,6 @@ def obter_dados_unificados(motorista_filtro, data_filtro):
         df_resumo = pd.DataFrame(columns=['Data', 'Motorista', 'Saiu (Carga)', 'Entregues', 'Devolvidos', 'Pendentes', 'Repasse Total (R$)'])
     else:
         df_resumo = pd.concat(dfs_keys).drop_duplicates()
-        
-        # Junta todas as contas na mesma linha
         if not g_c.empty: df_resumo = pd.merge(df_resumo, g_c.rename(columns={'pacotes':'saida'}), on=['data', 'motorista'], how='left')
         else: df_resumo['saida'] = 0
         
@@ -334,7 +354,6 @@ def obter_dados_unificados(motorista_filtro, data_filtro):
             'repasse': 'Repasse Total (R$)'
         }, inplace=True)
 
-    # Texto de resumo
     total_ent = df_resumo['Entregues'].sum() if not df_resumo.empty else 0
     total_dev = df_resumo['Devolvidos'].sum() if not df_resumo.empty else 0
     total_rep = df_resumo['Repasse Total (R$)'].sum() if not df_resumo.empty else 0.0
@@ -354,6 +373,18 @@ def exportar_excel_detalhado(motorista_filtro, data_filtro):
     df_uni.to_excel(caminho, index=False)
     return caminho
 
+# --- MELHORIA 2: BACKUP GERAL DE TODAS AS TABELAS ---
+def fazer_backup_geral():
+    caminho = "backup_geral_sannovas.xlsx"
+    with pd.ExcelWriter(caminho) as writer:
+        carregar_tabela('cargas').to_excel(writer, sheet_name="Cargas", index=False)
+        carregar_tabela('entregas').to_excel(writer, sheet_name="Entregas", index=False)
+        carregar_tabela('devolucoes').to_excel(writer, sheet_name="Devolucoes", index=False)
+        carregar_tabela('motoristas').to_excel(writer, sheet_name="Motoristas", index=False)
+        carregar_tabela('bairros').to_excel(writer, sheet_name="Bairros", index=False)
+        carregar_tabela('financeiro').to_excel(writer, sheet_name="Financeiro", index=False)
+    return caminho
+
 def gerar_comprovante_whatsapp(motorista_nome, data_consulta):
     if not motorista_nome or motorista_nome == "Todos":
         return "Selecione um motorista específico para gerar o fechamento."
@@ -361,7 +392,6 @@ def gerar_comprovante_whatsapp(motorista_nome, data_consulta):
         data_consulta = obter_data_hoje()
         
     df_resumo, _, _ = obter_dados_unificados(motorista_nome, data_consulta)
-    
     if df_resumo.empty:
         return f"Nenhuma movimentação encontrada para {motorista_nome} na data {data_consulta}."
 
@@ -475,7 +505,6 @@ with gr.Blocks(theme=gr.themes.Soft()) as app:
             
         resumo_filtro = gr.Textbox(label="Resultado", interactive=False)
         
-        # As duas novas tabelas unificadas
         tabela_resumo = gr.Dataframe(label="📊 Resumo Consolidado (Tudo na mesma linha)", interactive=False)
         tabela_detalhada = gr.Dataframe(label="📝 Histórico Detalhado Unificado", interactive=False)
         
@@ -489,11 +518,15 @@ with gr.Blocks(theme=gr.themes.Soft()) as app:
             height=300
         )
         
-        # Botões de Excel novos
         with gr.Row():
-            btn_exportar_excel_r = gr.Button("📊 Baixar Fechamento Consolidado (.xlsx)")
-            btn_exportar_excel_d = gr.Button("📊 Baixar Histórico Detalhado (.xlsx)")
+            btn_exportar_excel_r = gr.Button("📊 Baixar Fechamento (.xlsx)")
+            btn_exportar_excel_d = gr.Button("📊 Baixar Histórico (.xlsx)")
             btn_wa = gr.Button("📲 Gerar Resumo WhatsApp", variant="secondary")
+            
+        # Botão Inteligente de Pagamento Direto no Caixa
+        with gr.Row():
+            btn_pagar_caixa = gr.Button("💰 Lançar Pagamento do Repasse no Caixa (Automático)", variant="primary")
+            msg_pagamento = gr.Textbox(label="Status do Pagamento no Caixa", interactive=False)
             
         arquivo_download = gr.File(label="Ficheiro Gerado")
         texto_wa_out = gr.TextArea(label="Demonstrativo / Prestação de Contas WhatsApp", interactive=False)
@@ -505,6 +538,9 @@ with gr.Blocks(theme=gr.themes.Soft()) as app:
         btn_exportar_excel_r.click(exportar_excel_resumo, inputs=[filtro_mot, filtro_data], outputs=[arquivo_download])
         btn_exportar_excel_d.click(exportar_excel_detalhado, inputs=[filtro_mot, filtro_data], outputs=[arquivo_download])
         btn_wa.click(gerar_comprovante_whatsapp, inputs=[filtro_mot, filtro_data], outputs=[texto_wa_out])
+        
+        # Ação do novo botão de pagamento
+        btn_pagar_caixa.click(pagar_motorista_automatico, inputs=[filtro_mot, filtro_data], outputs=[msg_pagamento])
 
     with gr.Tab("Cadastro de Motoristas"):
         with gr.Row():
@@ -534,11 +570,17 @@ with gr.Blocks(theme=gr.themes.Soft()) as app:
             tipo_in = gr.Dropdown(choices=["Entrada", "Saída"], label="Tipo de Fluxo")
             valor_fin_in = gr.Number(label="Valor (R$)", value=0.0)
         
-        btn_fin = gr.Button("Salvar Lançamento", variant="primary")
+        with gr.Row():
+            btn_fin = gr.Button("Salvar Lançamento", variant="primary")
+            btn_backup = gr.Button("📥 Baixar Backup Geral (Todas as Tabelas)", variant="secondary")
+            
         msg_fin = gr.Textbox(label="Status", interactive=False)
         tabela_fin = gr.Dataframe(value=carregar_tabela('financeiro'), interactive=False, label="Fluxo de Caixa")
         
+        arquivo_backup = gr.File(label="Ficheiro de Backup Gerado")
+        
         btn_fin.click(registrar_financeiro, inputs=[desc_in, tipo_in, valor_fin_in], outputs=[tabela_fin, msg_fin, kpi_box])
+        btn_backup.click(fazer_backup_geral, outputs=[arquivo_backup])
 
 # 8. Lançar a aplicação com Autenticação Nativa (Login/Senha)
 app.launch(
