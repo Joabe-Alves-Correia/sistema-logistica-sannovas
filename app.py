@@ -22,6 +22,7 @@ with engine.begin() as conn:
             data TEXT,
             motorista TEXT,
             pacotes INTEGER,
+            rota TEXT,
             status TEXT DEFAULT 'Ativo'
         )
     '''))
@@ -71,9 +72,11 @@ with engine.begin() as conn:
             valor REAL
         )
     '''))
+    # Atualizações de tabelas existentes (Garante que as colunas novas são criadas)
     conn.execute(text("ALTER TABLE entregas ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'Ativo';"))
     conn.execute(text("ALTER TABLE devolucoes ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'Ativo';"))
     conn.execute(text("ALTER TABLE cargas ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'Ativo';"))
+    conn.execute(text("ALTER TABLE cargas ADD COLUMN IF NOT EXISTS rota TEXT;"))
 
 # 4. Funções Auxiliares, KPIs e Gráficos
 def carregar_tabela(nome_tabela):
@@ -145,7 +148,7 @@ def obter_mes_atual():
     return datetime.now().strftime("/%m/%Y")
 
 # 5. Operações de Banco de Dados
-def registrar_carga(data, motorista, pacotes):
+def registrar_carga(data, motorista, pacotes, rota):
     if not motorista or motorista == "Nenhum motorista cadastrado":
         return carregar_tabela('cargas'), "❌ Selecione um motorista válido!", calcular_kpis()
     if not data:
@@ -153,11 +156,11 @@ def registrar_carga(data, motorista, pacotes):
         
     with engine.begin() as conn:
         conn.execute(text('''
-            INSERT INTO cargas (data, motorista, pacotes, status)
-            VALUES (:data, :mot, :pac, 'Ativo')
-        '''), {"data": data, "mot": motorista, "pac": int(pacotes)})
+            INSERT INTO cargas (data, motorista, pacotes, rota, status)
+            VALUES (:data, :mot, :pac, :rota, 'Ativo')
+        '''), {"data": data, "mot": motorista, "pac": int(pacotes), "rota": rota})
         
-    return carregar_tabela('cargas'), f"✅ Saída de {pacotes} pacotes registrada para {motorista}!", calcular_kpis()
+    return carregar_tabela('cargas'), f"✅ Saída de {pacotes} pacotes registada para {motorista}!", calcular_kpis()
 
 def registrar_entrega(data, motorista, bairro, pacotes, valor_pacote):
     if not motorista or motorista == "Nenhum motorista cadastrado":
@@ -194,7 +197,7 @@ def registrar_devolucao(data, motorista, bairro, pacotes, motivo):
             VALUES (:data, :mot, :bai, :pac, :motivo, 'Ativo')
         '''), {"data": data, "mot": motorista, "bai": bairro, "pac": pacotes, "motivo": motivo})
     
-    return carregar_tabela('devolucoes'), f"✅ Devolução registrada ({pacotes} pacotes)!", calcular_kpis()
+    return carregar_tabela('devolucoes'), f"✅ Devolução registada ({pacotes} pacotes)!", calcular_kpis()
 
 def cadastrar_motorista(nome, pix, telefone):
     if not nome:
@@ -245,7 +248,7 @@ def cancelar_registro(id_registro):
         return carregar_tabela('entregas'), "❌ Informe o ID da entrega!", calcular_kpis(), gerar_grafico_bairros()
     with engine.begin() as conn:
         conn.execute(text("UPDATE entregas SET status = 'Cancelado' WHERE id = :id"), {"id": int(id_registro)})
-    return carregar_tabela('entregas'), f"⚠️ Registro #{id_registro} marcado como Cancelado.", calcular_kpis(), gerar_grafico_bairros()
+    return carregar_tabela('entregas'), f"⚠️ Registo #{id_registro} marcado como Cancelado.", calcular_kpis(), gerar_grafico_bairros()
 
 def cancelar_devolucao(id_registro):
     if not id_registro:
@@ -297,9 +300,13 @@ def gerar_comprovante_whatsapp(motorista_nome, data_consulta):
         data_consulta = obter_data_hoje()
         
     # Busca Carga Inicial (Saída)
-    query_carga = "SELECT pacotes FROM cargas WHERE status != 'Cancelado' AND motorista = :mot AND data LIKE :data"
+    query_carga = "SELECT pacotes, rota FROM cargas WHERE status != 'Cancelado' AND motorista = :mot AND data LIKE :data"
     df_c = pd.read_sql_query(text(query_carga), engine, params={"mot": motorista_nome, "data": f"%{data_consulta}%"})
     total_saida = df_c['pacotes'].sum() if not df_c.empty else 0
+    
+    # Extrai rotas para texto
+    rotas = [str(r) for r in df_c['rota'].dropna().unique() if str(r).strip() != ""]
+    texto_rotas = " / ".join(rotas) if rotas else "Não especificada"
 
     # Busca Entregas
     df_entregas, _ = filtrar_dados(motorista_nome, "Todos", data_consulta)
@@ -315,7 +322,7 @@ def gerar_comprovante_whatsapp(motorista_nome, data_consulta):
     pendentes = total_saida - (total_entregue + total_devolucoes)
     status_balanco = "✅ Fechamento OK" if pendentes == 0 else f"⚠️ Divergência de {pendentes} pacote(s)"
     if total_saida == 0:
-        status_balanco = "ℹ️ Carga Inicial não registrada no sistema"
+        status_balanco = "ℹ️ Carga Inicial não registada no sistema"
 
     df_mot = pd.read_sql_query(text("SELECT chave_pix, telefone FROM motoristas WHERE nome = :nome"), engine, params={"nome": motorista_nome})
     chave_pix = df_mot['chave_pix'].iloc[0] if not df_mot.empty else "Não cadastrada"
@@ -323,6 +330,7 @@ def gerar_comprovante_whatsapp(motorista_nome, data_consulta):
     texto_whatsapp = f"""📲 *FECHAMENTO DE ROTA DE ENTREGA*
 👤 *Motorista:* {motorista_nome}
 📅 *Data:* {data_consulta}
+🗺️ *Rota(s):* {texto_rotas}
 
 📦 *Carga Inicial (Saída):* {total_saida} pacotes
 ✅ *Pacotes Entregues:* {total_entregue} pacotes
@@ -342,21 +350,23 @@ with gr.Blocks(theme=gr.themes.Soft()) as app:
     kpi_box = gr.Markdown(value=calcular_kpis())
     
     with gr.Tab("Carga Inicial (Romaneio)"):
-        gr.Markdown("### 🚚 Registrar Saída de Carga do Galpão")
+        gr.Markdown("### 🚚 Registar Saída de Carga do Galpão")
         with gr.Row():
             data_carga_in = gr.Textbox(label="Data (DD/MM/AAAA) - Vazio para hoje")
             motorista_carga_in = gr.Dropdown(choices=listar_motoristas(), label="Motorista")
-            pacotes_carga_in = gr.Number(label="Quantidade Total de Pacotes na Saída", value=1, minimum=1)
+            pacotes_carga_in = gr.Number(label="Quantidade Total de Pacotes", value=1, minimum=1)
+        with gr.Row():
+            rota_carga_in = gr.Textbox(label="Rota / Observação (Opcional) - Ex: Zona Norte")
         
-        btn_carga = gr.Button("Registrar Saída de Carga", variant="primary")
+        btn_carga = gr.Button("Registar Saída de Carga", variant="primary")
         msg_carga = gr.Textbox(label="Status", interactive=False)
         tabela_cargas = gr.Dataframe(value=carregar_tabela('cargas'), interactive=False, label="Histórico de Saídas")
         
         with gr.Row():
-            id_cancelar_carga_in = gr.Number(label="ID do Registro de Carga para Cancelar", precision=0)
+            id_cancelar_carga_in = gr.Number(label="ID do Registo de Carga para Cancelar", precision=0)
             btn_cancelar_carga = gr.Button("⚠️ Cancelar Carga por ID", variant="stop")
             
-        btn_carga.click(registrar_carga, inputs=[data_carga_in, motorista_carga_in, pacotes_carga_in], outputs=[tabela_cargas, msg_carga, kpi_box])
+        btn_carga.click(registrar_carga, inputs=[data_carga_in, motorista_carga_in, pacotes_carga_in, rota_carga_in], outputs=[tabela_cargas, msg_carga, kpi_box])
         btn_cancelar_carga.click(cancelar_carga, inputs=[id_cancelar_carga_in], outputs=[tabela_cargas, msg_carga, kpi_box])
 
     with gr.Tab("Controle de Entregas"):
@@ -368,12 +378,12 @@ with gr.Blocks(theme=gr.themes.Soft()) as app:
             pacotes_in = gr.Number(label="Quantidade de Pacotes Entregues", value=1, minimum=1)
             valor_in = gr.Number(label="Valor por Pacote (R$)", value=0.0)
         
-        btn_entrega = gr.Button("Salvar Registro de Entrega", variant="primary")
+        btn_entrega = gr.Button("Salvar Registo de Entrega", variant="primary")
         msg_entrega = gr.Textbox(label="Status", interactive=False)
         tabela_entregas = gr.Dataframe(value=carregar_tabela('entregas'), interactive=False, label="Histórico de Entregas")
         
         with gr.Row():
-            id_cancelar_in = gr.Number(label="ID do Registro para Cancelar", precision=0)
+            id_cancelar_in = gr.Number(label="ID do Registo para Cancelar", precision=0)
             btn_cancelar = gr.Button("⚠️ Cancelar Entrega por ID", variant="stop")
             
         btn_entrega.click(registrar_entrega, inputs=[data_in, motorista_in, bairro_in, pacotes_in, valor_in], outputs=[tabela_entregas, msg_entrega, kpi_box, gr.BarPlot()])
@@ -392,7 +402,7 @@ with gr.Blocks(theme=gr.themes.Soft()) as app:
                 label="Motivo da Devolução"
             )
         
-        btn_devolucao = gr.Button("Registrar Devolução", variant="primary")
+        btn_devolucao = gr.Button("Registar Devolução", variant="primary")
         msg_devolucao = gr.Textbox(label="Status", interactive=False)
         tabela_devolucoes = gr.Dataframe(value=carregar_tabela('devolucoes'), interactive=False, label="Histórico de Devoluções")
         
@@ -432,7 +442,7 @@ with gr.Blocks(theme=gr.themes.Soft()) as app:
             btn_exportar_csv = gr.Button("📄 Baixar CSV (.csv)")
             btn_wa = gr.Button("📲 Gerar Fechamento de Rota (WhatsApp)", variant="secondary")
             
-        arquivo_download = gr.File(label="Arquivo Gerado")
+        arquivo_download = gr.File(label="Ficheiro Gerado")
         texto_wa_out = gr.TextArea(label="Demonstrativo / Prestação de Contas WhatsApp", interactive=False)
         
         btn_hoje.click(obter_data_hoje, outputs=[filtro_data])
