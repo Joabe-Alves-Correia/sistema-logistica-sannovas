@@ -37,6 +37,12 @@ with engine.begin() as conn:
         )
     '''))
     conn.execute(text('''
+        CREATE TABLE IF NOT EXISTS bairros (
+            id SERIAL PRIMARY KEY,
+            nome TEXT UNIQUE
+        )
+    '''))
+    conn.execute(text('''
         CREATE TABLE IF NOT EXISTS financeiro (
             id SERIAL PRIMARY KEY,
             data TEXT,
@@ -58,6 +64,14 @@ def listar_motoristas():
         return nomes if nomes else ["Nenhum motorista cadastrado"]
     except:
         return ["Nenhum motorista cadastrado"]
+
+def listar_bairros():
+    try:
+        df = pd.read_sql_query("SELECT nome FROM bairros ORDER BY nome ASC", engine)
+        nomes = df['nome'].dropna().unique().tolist()
+        return nomes if nomes else ["Nenhum bairro cadastrado"]
+    except:
+        return ["Nenhum bairro cadastrado"]
 
 def calcular_kpis():
     df_entregas = carregar_tabela('entregas')
@@ -104,6 +118,9 @@ def registrar_entrega(data, motorista, bairro, pacotes, valor_pacote):
     if not motorista or motorista == "Nenhum motorista cadastrado":
         return carregar_tabela('entregas'), "❌ Selecione ou cadastre um motorista válido!", calcular_kpis(), gerar_grafico_bairros()
         
+    if not bairro or bairro == "Nenhum bairro cadastrado":
+        return carregar_tabela('entregas'), "❌ Selecione ou cadastre um bairro válido!", calcular_kpis(), gerar_grafico_bairros()
+
     if not data:
         data = obter_data_hoje()
     total = pacotes * valor_pacote
@@ -118,7 +135,7 @@ def registrar_entrega(data, motorista, bairro, pacotes, valor_pacote):
 
 def cadastrar_motorista(nome, pix, telefone):
     if not nome:
-        return carregar_tabela('motoristas'), "❌ Informe o nome do motorista!", gr.update()
+        return carregar_tabela('motoristas'), "❌ Informe o nome do motorista!", gr.update(), gr.update()
         
     with engine.begin() as conn:
         conn.execute(text('''
@@ -127,7 +144,21 @@ def cadastrar_motorista(nome, pix, telefone):
         '''), {"nome": nome, "pix": pix, "tel": telefone})
     
     novos_motoristas = listar_motoristas()
-    return carregar_tabela('motoristas'), "✅ Motorista cadastrado com sucesso!", gr.update(choices=novos_motoristas)
+    return carregar_tabela('motoristas'), "✅ Motorista cadastrado com sucesso!", gr.update(choices=novos_motoristas), gr.update(choices=["Todos"] + novos_motoristas)
+
+def cadastrar_bairro(nome):
+    if not nome:
+        return carregar_tabela('bairros'), "❌ Informe o nome do bairro!", gr.update(), gr.update()
+        
+    nome_limpo = nome.strip()
+    with engine.begin() as conn:
+        conn.execute(text('''
+            INSERT INTO bairros (nome) VALUES (:nome)
+            ON CONFLICT (nome) DO NOTHING
+        '''), {"nome": nome_limpo})
+    
+    novos_bairros = listar_bairros()
+    return carregar_tabela('bairros'), "✅ Bairro cadastrado com sucesso!", gr.update(choices=novos_bairros), gr.update(choices=["Todos"] + novos_bairros)
 
 def registrar_financeiro(descricao, tipo, valor):
     data = obter_data_hoje()
@@ -155,7 +186,7 @@ def filtrar_dados(motorista_filtro, bairro_filtro, data_filtro):
     if motorista_filtro and motorista_filtro != "Todos":
         query += " AND motorista ILIKE :mot" 
         params["mot"] = f"%{motorista_filtro}%"
-    if bairro_filtro:
+    if bairro_filtro and bairro_filtro != "Todos":
         query += " AND bairro ILIKE :bai"
         params["bai"] = f"%{bairro_filtro}%"
     if data_filtro:
@@ -190,7 +221,7 @@ def gerar_comprovante_whatsapp(motorista_nome, data_consulta):
     if not data_consulta:
         data_consulta = obter_data_hoje()
         
-    df_entregas, _ = filtrar_dados(motorista_nome, "", data_consulta)
+    df_entregas, _ = filtrar_dados(motorista_nome, "Todos", data_consulta)
     df_mot = pd.read_sql_query(text("SELECT chave_pix, telefone FROM motoristas WHERE nome = :nome"), engine, params={"nome": motorista_nome})
     chave_pix = df_mot['chave_pix'].iloc[0] if not df_mot.empty else "Não cadastrada"
     
@@ -207,12 +238,12 @@ def gerar_comprovante_whatsapp(motorista_nome, data_consulta):
 💰 *Valor a Receber:* R$ {total_repasse:.2f}
 🔑 *Chave PIX:* {chave_pix}
 
-_Conferido pelo Sistema Logístico._"""
+_Conferido pelo Sistema SanNovas._"""
     return texto_whatsapp
 
 # 7. Interface Gráfica (Gradio)
 with gr.Blocks(theme=gr.themes.Soft()) as app:
-    gr.Markdown("# 📦 Sistema de Controle Logístico e Financeiro")
+    gr.Markdown("# 📦 SanNovas - Controle")
     
     kpi_box = gr.Markdown(value=calcular_kpis())
     
@@ -220,7 +251,7 @@ with gr.Blocks(theme=gr.themes.Soft()) as app:
         with gr.Row():
             data_in = gr.Textbox(label="Data (DD/MM/AAAA) - Vazio para hoje")
             motorista_in = gr.Dropdown(choices=listar_motoristas(), label="Motorista")
-            bairro_in = gr.Textbox(label="Bairro")
+            bairro_in = gr.Dropdown(choices=listar_bairros(), label="Bairro")
         with gr.Row():
             pacotes_in = gr.Number(label="Quantidade de Pacotes", value=1, minimum=1)
             valor_in = gr.Number(label="Valor por Pacote (R$)", value=0.0)
@@ -240,7 +271,7 @@ with gr.Blocks(theme=gr.themes.Soft()) as app:
         with gr.Row():
             filtro_data = gr.Textbox(label="Data (DD/MM/AAAA)")
             filtro_mot = gr.Dropdown(choices=["Todos"] + listar_motoristas(), value="Todos", label="Motorista")
-            filtro_bairro = gr.Textbox(label="Bairro")
+            filtro_bairro = gr.Dropdown(choices=["Todos"] + listar_bairros(), value="Todos", label="Bairro")
         
         with gr.Row():
             btn_hoje = gr.Button("📅 Data de Hoje", variant="secondary")
@@ -285,7 +316,17 @@ with gr.Blocks(theme=gr.themes.Soft()) as app:
         msg_mot = gr.Textbox(label="Status", interactive=False)
         tabela_mot = gr.Dataframe(value=carregar_tabela('motoristas'), interactive=False, label="Motoristas Cadastrados")
         
-        btn_mot.click(cadastrar_motorista, inputs=[nome_in, pix_in, tel_in], outputs=[tabela_mot, msg_mot, motorista_in])
+        btn_mot.click(cadastrar_motorista, inputs=[nome_in, pix_in, tel_in], outputs=[tabela_mot, msg_mot, motorista_in, filtro_mot])
+
+    with gr.Tab("Cadastro de Bairros"):
+        with gr.Row():
+            nome_bairro_in = gr.Textbox(label="Nome do Bairro")
+        
+        btn_bairro = gr.Button("Cadastrar Bairro", variant="primary")
+        msg_bairro = gr.Textbox(label="Status", interactive=False)
+        tabela_bairros = gr.Dataframe(value=carregar_tabela('bairros'), interactive=False, label="Bairros Cadastrados")
+        
+        btn_bairro.click(cadastrar_bairro, inputs=[nome_bairro_in], outputs=[tabela_bairros, msg_bairro, bairro_in, filtro_bairro])
 
     with gr.Tab("Financeiro"):
         with gr.Row():
