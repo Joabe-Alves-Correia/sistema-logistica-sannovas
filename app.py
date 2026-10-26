@@ -99,7 +99,20 @@ def filtrar_dados(motorista_filtro, bairro_filtro, data_filtro):
     resumo = f"Filtro: {total_pacotes} Pacotes | Repasse: R$ {total_pago:.2f}"
     return df_filtrado, resumo
 
-# 4. Interface Web
+# 4. Funções de Exportação de Arquivos
+def exportar_excel(motorista_filtro, bairro_filtro, data_filtro):
+    df_filtrado, _ = filtrar_dados(motorista_filtro, bairro_filtro, data_filtro)
+    caminho_arquivo = "relatorio_entregas.xlsx"
+    df_filtrado.to_excel(caminho_arquivo, index=False)
+    return caminho_arquivo
+
+def exportar_csv(motorista_filtro, bairro_filtro, data_filtro):
+    df_filtrado, _ = filtrar_dados(motorista_filtro, bairro_filtro, data_filtro)
+    caminho_arquivo = "relatorio_entregas.csv"
+    df_filtrado.to_csv(caminho_arquivo, index=False, encoding="utf-8-sig")
+    return caminho_arquivo
+
+# 5. Interface Web
 with gr.Blocks(theme=gr.themes.Soft()) as app:
     gr.Markdown("# 📦 Sistema de Controle Logístico e Financeiro (Conectado à Nuvem)")
     
@@ -118,17 +131,25 @@ with gr.Blocks(theme=gr.themes.Soft()) as app:
         
         btn_entrega.click(registrar_entrega, inputs=[data_in, motorista_in, bairro_in, pacotes_in, valor_in], outputs=[tabela_entregas, msg_entrega])
 
-    with gr.Tab("Relatórios e Filtros"):
+    with gr.Tab("Relatórios e Exportação"):
         with gr.Row():
-            filtro_data = gr.Textbox(label="Data")
-            filtro_mot = gr.Textbox(label="Motorista")
-            filtro_bairro = gr.Textbox(label="Bairro")
+            filtro_data = gr.Textbox(label="Filtrar por Data (DD/MM/AAAA)")
+            filtro_mot = gr.Textbox(label="Filtrar por Motorista")
+            filtro_bairro = gr.Textbox(label="Filtrar por Bairro")
             
         btn_filtrar = gr.Button("🔍 Aplicar Filtros", variant="primary")
         resumo_filtro = gr.Textbox(label="Resumo", interactive=False)
         tabela_filtrada = gr.Dataframe(label="Resultados", interactive=False)
         
+        with gr.Row():
+            btn_exportar_excel = gr.Button("📊 Baixar em Excel (.xlsx)")
+            btn_exportar_csv = gr.Button("📄 Baixar em CSV (.csv)")
+            
+        arquivo_download = gr.File(label="Arquivo Gerado para Download")
+        
         btn_filtrar.click(filtrar_dados, inputs=[filtro_mot, filtro_bairro, filtro_data], outputs=[tabela_filtrada, resumo_filtro])
+        btn_exportar_excel.click(exportar_excel, inputs=[filtro_mot, filtro_bairro, filtro_data], outputs=[arquivo_download])
+        btn_exportar_csv.click(exportar_csv, inputs=[filtro_mot, filtro_bairro, filtro_data], outputs=[arquivo_download])
 
     with gr.Tab("Cadastro de Motoristas"):
         with gr.Row():
@@ -154,5 +175,4 @@ with gr.Blocks(theme=gr.themes.Soft()) as app:
         
         btn_fin.click(registrar_financeiro, inputs=[desc_in, tipo_in, valor_fin_in], outputs=[tabela_fin, msg_fin])
 
-# 5. Lançar o servidor escutando em todas as interfaces para o Render
 app.launch(server_name="0.0.0.0", server_port=7860)
