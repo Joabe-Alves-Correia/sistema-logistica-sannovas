@@ -238,7 +238,6 @@ def cadastrar_motorista(nome, veiculo, tarifa_repasse, pix, telefone):
         
     nome_limpo = nome.strip()
     with engine.begin() as conn:
-        # Verifica se já existe
         existe = conn.execute(text("SELECT id FROM motoristas WHERE nome ILIKE :nome"), {"nome": nome_limpo}).fetchone()
         if existe:
             conn.execute(text('''
@@ -481,7 +480,7 @@ def gerar_comprovante_whatsapp(motorista_nome, data_consulta):
 _Conferido pelo Sistema SanNovas._"""
     return texto_whatsapp
 
-# 7. Interface Gráfica (Gradio)
+# 7. Interface Gráfica (Gradiated)
 with gr.Blocks(theme=gr.themes.Soft()) as app:
     gr.Markdown("# 📦 SanNovas - Controle")
     
@@ -525,8 +524,8 @@ with gr.Blocks(theme=gr.themes.Soft()) as app:
             id_cancelar_in = gr.Number(label="ID do Registo para Cancelar", precision=0)
             btn_cancelar = gr.Button("⚠️ Cancelar Entrega por ID", variant="stop")
             
-        btn_entrega.click(registrar_entrega, inputs=[data_in, motorista_in, bairro_in, pacotes_in, valor_recebido_in], outputs=[tabela_entregas, msg_entrega, kpi_box, gr.BarPlot()])
-        btn_cancelar.click(cancelar_registro, inputs=[id_cancelar_in], outputs=[tabela_entregas, msg_entrega, kpi_box, gr.BarPlot()])
+        btn_entrega.click(registrar_entrega, inputs=[data_in, motorista_in, bairro_in, pacotes_in, valor_recebido_in], outputs=[tabela_entregas, msg_entrega, kpi_box])
+        btn_cancelar.click(cancelar_registro, inputs=[id_cancelar_in], outputs=[tabela_entregas, msg_entrega, kpi_box])
 
     with gr.Tab("Controle de Devoluções"):
         with gr.Row():
@@ -569,7 +568,7 @@ with gr.Blocks(theme=gr.themes.Soft()) as app:
         
         gr.Markdown("### 📈 Volume de Pacotes por Bairro (Apenas Sucessos)")
         grafico_out = gr.BarPlot(
-            value=grafico_bairros := gerar_grafico_bairros(),
+            value=gerar_grafico_bairros(),
             x="bairro",
             y="pacotes",
             title="Pacotes Entregues por Bairro",
