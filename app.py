@@ -54,7 +54,7 @@ with engine.begin() as conn:
     conn.execute(text('''
         CREATE TABLE IF NOT EXISTS motoristas (
             id SERIAL PRIMARY KEY,
-            nome TEXT UNIQUE,
+            nome TEXT,
             veiculo TEXT,
             tarifa_repasse REAL,
             chave_pix TEXT,
@@ -236,19 +236,36 @@ def cadastrar_motorista(nome, veiculo, tarifa_repasse, pix, telefone):
     if not nome:
         return carregar_tabela('motoristas'), "❌ Informe o nome do motorista!", gr.update(), gr.update(), gr.update(), gr.update()
         
+    nome_limpo = nome.strip()
     with engine.begin() as conn:
-        conn.execute(text('''
-            INSERT INTO motoristas (nome, veiculo, tarifa_repasse, chave_pix, telefone)
-            VALUES (:nome, :veiculo, :tarifa, :pix, :tel)
-            ON CONFLICT (nome) DO UPDATE SET 
-                veiculo = EXCLUDED.veiculo,
-                tarifa_repasse = EXCLUDED.tarifa_repasse,
-                chave_pix = EXCLUDED.chave_pix,
-                telefone = EXCLUDED.telefone
-        '''), {"nome": nome, "veiculo": veiculo, "tarifa": float(tarifa_repasse), "pix": pix, "tel": telefone})
+        # Verifica se já existe
+        existe = conn.execute(text("SELECT id FROM motoristas WHERE nome ILIKE :nome"), {"nome": nome_limpo}).fetchone()
+        if existe:
+            conn.execute(text('''
+                UPDATE motoristas SET veiculo = :veiculo, tarifa_repasse = :tarifa, chave_pix = :pix, telefone = :tel
+                WHERE nome ILIKE :nome
+            '''), {"nome": nome_limpo, "veiculo": veiculo, "tarifa": float(tarifa_repasse), "pix": pix, "tel": telefone})
+            msg = f"✅ Motorista '{nome_limpo}' atualizado com sucesso!"
+        else:
+            conn.execute(text('''
+                INSERT INTO motoristas (nome, veiculo, tarifa_repasse, chave_pix, telefone)
+                VALUES (:nome, :veiculo, :tarifa, :pix, :tel)
+            '''), {"nome": nome_limpo, "veiculo": veiculo, "tarifa": float(tarifa_repasse), "pix": pix, "tel": telefone})
+            msg = f"✅ Motorista '{nome_limpo}' cadastrado com sucesso!"
     
     novos_motoristas = listar_motoristas()
-    return carregar_tabela('motoristas'), f"✅ Motorista '{nome}' registado/atualizado com sucesso!", gr.update(choices=novos_motoristas), gr.update(choices=novos_motoristas), gr.update(choices=novos_motoristas), gr.update(choices=["Todos"] + novos_motoristas)
+    return carregar_tabela('motoristas'), msg, gr.update(choices=novos_motoristas), gr.update(choices=novos_motoristas), gr.update(choices=novos_motoristas), gr.update(choices=["Todos"] + novos_motoristas)
+
+def apagar_motorista(id_motorista):
+    if not id_motorista:
+        return carregar_tabela('motoristas'), "❌ Informe o ID do motorista para apagar!", gr.update(), gr.update(), gr.update(), gr.update()
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("DELETE FROM motoristas WHERE id = :id"), {"id": int(id_motorista)})
+        novos_motoristas = listar_motoristas()
+        return carregar_tabela('motoristas'), f"🗑️ Motorista #{id_motorista} apagado com sucesso!", gr.update(choices=novos_motoristas), gr.update(choices=novos_motoristas), gr.update(choices=novos_motoristas), gr.update(choices=["Todos"] + novos_motoristas)
+    except Exception as e:
+        return carregar_tabela('motoristas'), f"❌ Erro ao apagar: {e}", gr.update(), gr.update(), gr.update(), gr.update()
 
 def cadastrar_bairro(nome):
     if not nome:
@@ -552,7 +569,7 @@ with gr.Blocks(theme=gr.themes.Soft()) as app:
         
         gr.Markdown("### 📈 Volume de Pacotes por Bairro (Apenas Sucessos)")
         grafico_out = gr.BarPlot(
-            value=gerar_grafico_bairros(),
+            value=grafico_bairros := gerar_grafico_bairros(),
             x="bairro",
             y="pacotes",
             title="Pacotes Entregues por Bairro",
@@ -582,7 +599,7 @@ with gr.Blocks(theme=gr.themes.Soft()) as app:
         btn_pagar_caixa.click(pagar_motorista_automatico, inputs=[filtro_mot, filtro_data], outputs=[msg_pagamento])
 
     with gr.Tab("Cadastro de Motoristas"):
-        gr.Markdown("### 👤 Cadastrar Novo ou Atualizar Dados (Basta digitar o mesmo nome para atualizar)")
+        gr.Markdown("### 👤 Cadastrar / Atualizar / Apagar Motoristas")
         with gr.Row():
             nome_in = gr.Textbox(label="Nome Completo")
             veiculo_in = gr.Dropdown(choices=["Carro", "Moto", "Bicicleta", "Outro"], value="Moto", label="Tipo de Veículo")
@@ -591,11 +608,18 @@ with gr.Blocks(theme=gr.themes.Soft()) as app:
             pix_in = gr.Textbox(label="Chave PIX")
             tel_in = gr.Textbox(label="Telefone / WhatsApp")
         
-        btn_mot = gr.Button("Guardar / Atualizar Motorista", variant="primary")
+        with gr.Row():
+            btn_mot = gr.Button("Guardar / Atualizar Motorista", variant="primary")
+            
+        with gr.Row():
+            id_apagar_mot_in = gr.Number(label="ID do Motorista para Apagar", precision=0)
+            btn_apagar_mot = gr.Button("🗑️ Apagar Motorista por ID", variant="stop")
+            
         msg_mot = gr.Textbox(label="Status", interactive=False)
-        tabela_mot = gr.Dataframe(value=carregar_tabela('motoristas'), interactive=False, label="Motoristas Cadastrados")
+        tabela_mot = gr.Dataframe(value=carregar_tabela('motoristas'), interactive=False, label="Motoristas Cadastrados (Veja o ID aqui)")
         
         btn_mot.click(cadastrar_motorista, inputs=[nome_in, veiculo_in, tarifa_in, pix_in, tel_in], outputs=[tabela_mot, msg_mot, motorista_carga_in, motorista_in, motorista_dev_in, filtro_mot])
+        btn_apagar_mot.click(apagar_motorista, inputs=[id_apagar_mot_in], outputs=[tabela_mot, msg_mot, motorista_carga_in, motorista_in, motorista_dev_in, filtro_mot])
 
     with gr.Tab("Cadastro de Bairros"):
         with gr.Row():
