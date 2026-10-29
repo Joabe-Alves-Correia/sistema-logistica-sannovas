@@ -33,8 +33,10 @@ with engine.begin() as conn:
             motorista TEXT,
             bairro TEXT,
             pacotes INTEGER,
-            valor_pacote REAL,
-            total REAL,
+            valor_recebido REAL,
+            valor_repasse REAL,
+            total_recebido REAL,
+            total_repasse REAL,
             status TEXT DEFAULT 'Ativo'
         )
     '''))
@@ -53,6 +55,8 @@ with engine.begin() as conn:
         CREATE TABLE IF NOT EXISTS motoristas (
             id SERIAL PRIMARY KEY,
             nome TEXT,
+            veiculo TEXT,
+            tarifa_repasse REAL,
             chave_pix TEXT,
             telefone TEXT
         )
@@ -72,7 +76,16 @@ with engine.begin() as conn:
             valor REAL
         )
     '''))
+    # Migrações e colunas novas em bases existentes
     conn.execute(text("ALTER TABLE entregas ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'Ativo';"))
+    conn.execute(text("ALTER TABLE entregas ADD COLUMN IF NOT EXISTS valor_recebido REAL DEFAULT 0.0;"))
+    conn.execute(text("ALTER TABLE entregas ADD COLUMN IF NOT EXISTS valor_repasse REAL DEFAULT 0.0;"))
+    conn.execute(text("ALTER TABLE entregas ADD COLUMN IF NOT EXISTS total_recebido REAL DEFAULT 0.0;"))
+    conn.execute(text("ALTER TABLE entregas ADD COLUMN IF NOT EXISTS total_repasse REAL DEFAULT 0.0;"))
+    
+    conn.execute(text("ALTER TABLE motoristas ADD COLUMN IF NOT EXISTS veiculo TEXT;"))
+    conn.execute(text("ALTER TABLE motoristas ADD COLUMN IF NOT EXISTS tarifa_repasse REAL DEFAULT 0.0;"))
+    
     conn.execute(text("ALTER TABLE devolucoes ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'Ativo';"))
     conn.execute(text("ALTER TABLE cargas ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'Ativo';"))
     conn.execute(text("ALTER TABLE cargas ADD COLUMN IF NOT EXISTS rota TEXT;"))
@@ -97,6 +110,15 @@ def listar_bairros():
     except:
         return ["Nenhum bairro cadastrado"]
 
+def buscar_tarifa_motorista(motorista_nome):
+    try:
+        df = pd.read_sql_query("SELECT tarifa_repasse FROM motoristas WHERE nome = :nome", engine, params={"nome": motorista_nome})
+        if not df.empty and pd.notna(df['tarifa_repasse'].iloc[0]):
+            return float(df['tarifa_repasse'].iloc[0])
+    except:
+        pass
+    return 0.0
+
 def calcular_kpis():
     df_cargas = carregar_tabela('cargas')
     df_entregas = carregar_tabela('entregas')
@@ -113,7 +135,14 @@ def calcular_kpis():
     total_saida = int(df_cargas['pacotes'].sum()) if not df_cargas.empty else 0
     total_entregue = int(df_entregas['pacotes'].sum()) if not df_entregas.empty else 0
     total_devolvido = int(df_devolucoes['pacotes'].sum()) if not df_devolucoes.empty else 0
-    total_repasse = float(df_entregas['total'].sum()) if not df_entregas.empty else 0.0
+    
+    # Compatibilidade com colunas antigas ou novas
+    col_repasse = 'total_repasse' if 'total_repasse' in df_entregas.columns else 'total'
+    col_recebido = 'total_recebido' if 'total_recebido' in df_entregas.columns else 'total'
+    
+    total_repasse = float(df_entregas[col_repasse].sum()) if not df_entregas.empty else 0.0
+    total_recebido = float(df_entregas[col_recebido].sum()) if not df_entregas.empty else 0.0
+    lucro_bruto = total_recebido - total_repasse
     
     entradas = float(df_fin[df_fin['tipo'] == 'Entrada']['valor'].sum()) if not df_fin.empty else 0.0
     saidas = float(df_fin[df_fin['tipo'] == 'Saída']['valor'].sum()) if not df_fin.empty else 0.0
@@ -121,10 +150,10 @@ def calcular_kpis():
     
     kpi_texto = f"""
     ### 📊 Indicadores Gerais
-    * **Carga Total Saída (Romaneios):** {total_saida} pacotes
-    * **Total Entregue:** {total_entregue} pacotes | **Total Devolvido:** {total_devolvido} pacotes
-    * **Total em Repasses:** R$ {total_repasse:.2f}
-    * **Saldo de Caixa (Entradas - Saídas):** R$ {saldo:.2f}
+    * **Carga Total Saída:** {total_saida} pacotes | **Entregues:** {total_entregue} | **Devolvidos:** {total_devolvido}
+    * **Total Recebido (Cliente):** R$ {total_recebido:.2f} | **Total Repasse (Motoristas):** R$ {total_repasse:.2f}
+    * **Lucro Bruto Estimado:** R$ {lucro_bruto:.2f}
+    * **Saldo de Caixa Atual:** R$ {saldo:.2f}
     """
     return kpi_texto
 
@@ -161,7 +190,7 @@ def registrar_carga(data, motorista, pacotes, rota):
         
     return carregar_tabela('cargas'), f"✅ Saída de {pacotes} pacotes registada para {motorista}!", calcular_kpis()
 
-def registrar_entrega(data, motorista, bairro, pacotes, valor_pacote):
+def registrar_entrega(data, motorista, bairro, pacotes, valor_recebido):
     if not motorista or motorista == "Nenhum motorista cadastrado":
         return carregar_tabela('entregas'), "❌ Selecione ou cadastre um motorista válido!", calcular_kpis(), gerar_grafico_bairros()
         
@@ -170,15 +199,24 @@ def registrar_entrega(data, motorista, bairro, pacotes, valor_pacote):
 
     if not data:
         data = obter_data_hoje()
-    total = pacotes * valor_pacote
+        
+    # Busca automática da tarifa cadastrada para o motorista
+    tarifa_repasse = buscar_tarifa_motorista(motorista)
+    
+    total_recebido = pacotes * valor_recebido
+    total_repasse = pacotes * tarifa_repasse
     
     with engine.begin() as conn:
         conn.execute(text('''
-            INSERT INTO entregas (data, motorista, bairro, pacotes, valor_pacote, total, status)
-            VALUES (:data, :mot, :bai, :pac, :val, :tot, 'Ativo')
-        '''), {"data": data, "mot": motorista, "bai": bairro, "pac": pacotes, "val": valor_pacote, "tot": total})
+            INSERT INTO entregas (data, motorista, bairro, pacotes, valor_recebido, valor_repasse, total_recebido, total_repasse, status)
+            VALUES (:data, :mot, :bai, :pac, :val_rec, :val_rep, :tot_rec, :tot_rep, 'Ativo')
+        '''), {
+            "data": data, "mot": motorista, "bai": bairro, "pac": pacotes, 
+            "val_rec": valor_recebido, "val_rep": tarifa_repasse, 
+            "tot_rec": total_recebido, "tot_rep": total_repasse
+        })
     
-    return carregar_tabela('entregas'), f"✅ Salvo! Total Repasse: R$ {total:.2f}", calcular_kpis(), gerar_grafico_bairros()
+    return carregar_tabela('entregas'), f"✅ Salvo! Recebido: R$ {total_recebido:.2f} | Repasse (R$ {tarifa_repasse:.2f}/un): R$ {total_repasse:.2f}", calcular_kpis(), gerar_grafico_bairros()
 
 def registrar_devolucao(data, motorista, bairro, pacotes, motivo):
     if not motorista or motorista == "Nenhum motorista cadastrado":
@@ -198,15 +236,15 @@ def registrar_devolucao(data, motorista, bairro, pacotes, motivo):
     
     return carregar_tabela('devolucoes'), f"✅ Devolução registada ({pacotes} pacotes)!", calcular_kpis()
 
-def cadastrar_motorista(nome, pix, telefone):
+def cadastrar_motorista(nome, veiculo, tarifa_repasse, pix, telefone):
     if not nome:
         return carregar_tabela('motoristas'), "❌ Informe o nome do motorista!", gr.update(), gr.update(), gr.update(), gr.update()
         
     with engine.begin() as conn:
         conn.execute(text('''
-            INSERT INTO motoristas (nome, chave_pix, telefone)
-            VALUES (:nome, :pix, :tel)
-        '''), {"nome": nome, "pix": pix, "tel": telefone})
+            INSERT INTO motoristas (nome, veiculo, tarifa_repasse, chave_pix, telefone)
+            VALUES (:nome, :veiculo, :tarifa, :pix, :tel)
+        '''), {"nome": nome, "veiculo": veiculo, "tarifa": float(tarifa_repasse), "pix": pix, "tel": telefone})
     
     novos_motoristas = listar_motoristas()
     return carregar_tabela('motoristas'), "✅ Motorista cadastrado com sucesso!", gr.update(choices=novos_motoristas), gr.update(choices=novos_motoristas), gr.update(choices=novos_motoristas), gr.update(choices=["Todos"] + novos_motoristas)
@@ -235,7 +273,6 @@ def registrar_financeiro(descricao, tipo, valor):
     
     return carregar_tabela('financeiro'), "✅ Lançamento salvo!", calcular_kpis()
 
-# --- MELHORIA 1: BOTÃO INTELIGENTE DE PAGAMENTO NO CAIXA ---
 def pagar_motorista_automatico(motorista_nome, data_consulta):
     if not motorista_nome or motorista_nome == "Todos":
         return "❌ Selecione um motorista específico para efetuar o pagamento."
@@ -293,7 +330,10 @@ def obter_dados_unificados(motorista_filtro, data_filtro):
         params['data'] = f"%{data_filtro}%"
 
     df_c = pd.read_sql_query(text(f"SELECT data, motorista, rota as bairro, pacotes, '1 - Carga (Saída)' as tipo FROM cargas WHERE {cond}"), engine, params=params)
-    df_e = pd.read_sql_query(text(f"SELECT data, motorista, bairro, pacotes, total, '2 - Entrega' as tipo FROM entregas WHERE {cond}"), engine, params=params)
+    
+    # Tratamento para colunas de repasse e recebido
+    df_e = pd.read_sql_query(text(f"SELECT data, motorista, bairro, pacotes, total_recebido, total_repasse, '2 - Entrega' as tipo FROM entregas WHERE {cond}"), engine, params=params)
+    
     df_d = pd.read_sql_query(text(f"SELECT data, motorista, bairro, pacotes, motivo, '3 - Devolução' as tipo FROM devolucoes WHERE {cond}"), engine, params=params)
 
     list_dfs = []
@@ -303,7 +343,7 @@ def obter_dados_unificados(motorista_filtro, data_filtro):
         list_dfs.append(temp_c[['data', 'motorista', 'tipo', 'bairro', 'pacotes', 'detalhe']])
     if not df_e.empty:
         temp_e = df_e.copy()
-        temp_e['detalhe'] = "R$ " + temp_e['total'].astype(str)
+        temp_e['detalhe'] = "Rec: R$ " + temp_e['total_recebido'].astype(str) + " | Rep: R$ " + temp_e['total_repasse'].astype(str)
         list_dfs.append(temp_e[['data', 'motorista', 'tipo', 'bairro', 'pacotes', 'detalhe']])
     if not df_d.empty:
         temp_d = df_d.copy()
@@ -318,7 +358,7 @@ def obter_dados_unificados(motorista_filtro, data_filtro):
         df_uni = pd.DataFrame(columns=['Data', 'Motorista', 'Operação', 'Bairro/Rota', 'Pacotes', 'Info Adicional'])
 
     g_c = df_c.groupby(['data', 'motorista'], as_index=False)['pacotes'].sum() if not df_c.empty else pd.DataFrame(columns=['data', 'motorista', 'pacotes'])
-    g_e = df_e.groupby(['data', 'motorista'], as_index=False)[['pacotes', 'total']].sum() if not df_e.empty else pd.DataFrame(columns=['data', 'motorista', 'pacotes', 'total'])
+    g_e = df_e.groupby(['data', 'motorista'], as_index=False)[['pacotes', 'total_recebido', 'total_repasse']].sum() if not df_e.empty else pd.DataFrame(columns=['data', 'motorista', 'pacotes', 'total_recebido', 'total_repasse'])
     g_d = df_d.groupby(['data', 'motorista'], as_index=False)['pacotes'].sum() if not df_d.empty else pd.DataFrame(columns=['data', 'motorista', 'pacotes'])
 
     dfs_keys = []
@@ -327,15 +367,17 @@ def obter_dados_unificados(motorista_filtro, data_filtro):
     if not g_d.empty: dfs_keys.append(g_d[['data', 'motorista']])
     
     if not dfs_keys:
-        df_resumo = pd.DataFrame(columns=['Data', 'Motorista', 'Saiu (Carga)', 'Entregues', 'Devolvidos', 'Pendentes', 'Repasse Total (R$)'])
+        df_resumo = pd.DataFrame(columns=['Data', 'Motorista', 'Saiu (Carga)', 'Entregues', 'Devolvidos', 'Pendentes', 'Total Recebido (R$)', 'Repasse Total (R$)'])
     else:
         df_resumo = pd.concat(dfs_keys).drop_duplicates()
         if not g_c.empty: df_resumo = pd.merge(df_resumo, g_c.rename(columns={'pacotes':'saida'}), on=['data', 'motorista'], how='left')
         else: df_resumo['saida'] = 0
         
-        if not g_e.empty: df_resumo = pd.merge(df_resumo, g_e.rename(columns={'pacotes':'entregues', 'total':'repasse'}), on=['data', 'motorista'], how='left')
+        if not g_e.empty: 
+            df_resumo = pd.merge(df_resumo, g_e.rename(columns={'pacotes':'entregues', 'total_recebido':'recebido', 'total_repasse':'repasse'}), on=['data', 'motorista'], how='left')
         else: 
             df_resumo['entregues'] = 0
+            df_resumo['recebido'] = 0
             df_resumo['repasse'] = 0
             
         if not g_d.empty: df_resumo = pd.merge(df_resumo, g_d.rename(columns={'pacotes':'devolvidos'}), on=['data', 'motorista'], how='left')
@@ -351,13 +393,15 @@ def obter_dados_unificados(motorista_filtro, data_filtro):
             'entregues': 'Entregues',
             'devolvidos': 'Devolvidos',
             'pendentes': 'Pendentes',
+            'recebido': 'Total Recebido (R$)',
             'repasse': 'Repasse Total (R$)'
         }, inplace=True)
 
     total_ent = df_resumo['Entregues'].sum() if not df_resumo.empty else 0
     total_dev = df_resumo['Devolvidos'].sum() if not df_resumo.empty else 0
+    total_rec = df_resumo['Total Recebido (R$)'].sum() if not df_resumo.empty else 0.0
     total_rep = df_resumo['Repasse Total (R$)'].sum() if not df_resumo.empty else 0.0
-    texto_resumo = f"Resumo Global do Filtro: {total_ent} Entregues | {total_dev} Devolvidos | Repasse Total R$ {total_rep:.2f}"
+    texto_resumo = f"Resumo Global: {total_ent} Entregues | {total_dev} Devolvidos | Recebido: R$ {total_rec:.2f} | Repasse: R$ {total_rep:.2f}"
     
     return df_resumo, df_uni, texto_resumo
 
@@ -373,7 +417,6 @@ def exportar_excel_detalhado(motorista_filtro, data_filtro):
     df_uni.to_excel(caminho, index=False)
     return caminho
 
-# --- MELHORIA 2: BACKUP GERAL DE TODAS AS TABELAS ---
 def fazer_backup_geral():
     caminho = "backup_geral_sannovas.xlsx"
     with pd.ExcelWriter(caminho) as writer:
@@ -450,13 +493,15 @@ with gr.Blocks(theme=gr.themes.Soft()) as app:
         btn_cancelar_carga.click(cancelar_carga, inputs=[id_cancelar_carga_in], outputs=[tabela_cargas, msg_carga, kpi_box])
 
     with gr.Tab("Controle de Entregas"):
+        gr.Markdown("### 📦 Registo de Sucesso (O repasse ao motorista é calculado automaticamente pelo cadastro dele)")
         with gr.Row():
             data_in = gr.Textbox(label="Data (DD/MM/AAAA) - Vazio para hoje")
             motorista_in = gr.Dropdown(choices=listar_motoristas(), label="Motorista")
             bairro_in = gr.Dropdown(choices=listar_bairros(), label="Bairro")
         with gr.Row():
             pacotes_in = gr.Number(label="Quantidade de Pacotes Entregues", value=1, minimum=1)
-            valor_in = gr.Number(label="Valor por Pacote (R$)", value=0.0)
+            # Alterado para valor recebido por pacote do cliente
+            valor_recebido_in = gr.Number(label="Valor Recebido por Pacote do Cliente (R$)", value=0.0)
         
         btn_entrega = gr.Button("Salvar Registo de Entrega", variant="primary")
         msg_entrega = gr.Textbox(label="Status", interactive=False)
@@ -466,7 +511,7 @@ with gr.Blocks(theme=gr.themes.Soft()) as app:
             id_cancelar_in = gr.Number(label="ID do Registo para Cancelar", precision=0)
             btn_cancelar = gr.Button("⚠️ Cancelar Entrega por ID", variant="stop")
             
-        btn_entrega.click(registrar_entrega, inputs=[data_in, motorista_in, bairro_in, pacotes_in, valor_in], outputs=[tabela_entregas, msg_entrega, kpi_box, gr.BarPlot()])
+        btn_entrega.click(registrar_entrega, inputs=[data_in, motorista_in, bairro_in, pacotes_in, valor_recebido_in], outputs=[tabela_entregas, msg_entrega, kpi_box, gr.BarPlot()])
         btn_cancelar.click(cancelar_registro, inputs=[id_cancelar_in], outputs=[tabela_entregas, msg_entrega, kpi_box, gr.BarPlot()])
 
     with gr.Tab("Controle de Devoluções"):
@@ -505,7 +550,7 @@ with gr.Blocks(theme=gr.themes.Soft()) as app:
             
         resumo_filtro = gr.Textbox(label="Resultado", interactive=False)
         
-        tabela_resumo = gr.Dataframe(label="📊 Resumo Consolidado (Tudo na mesma linha)", interactive=False)
+        tabela_resumo = gr.Dataframe(label="📊 Resumo Consolidado", interactive=False)
         tabela_detalhada = gr.Dataframe(label="📝 Histórico Detalhado Unificado", interactive=False)
         
         gr.Markdown("### 📈 Volume de Pacotes por Bairro (Apenas Sucessos)")
@@ -523,7 +568,6 @@ with gr.Blocks(theme=gr.themes.Soft()) as app:
             btn_exportar_excel_d = gr.Button("📊 Baixar Histórico (.xlsx)")
             btn_wa = gr.Button("📲 Gerar Resumo WhatsApp", variant="secondary")
             
-        # Botão Inteligente de Pagamento Direto no Caixa
         with gr.Row():
             btn_pagar_caixa = gr.Button("💰 Lançar Pagamento do Repasse no Caixa (Automático)", variant="primary")
             msg_pagamento = gr.Textbox(label="Status do Pagamento no Caixa", interactive=False)
@@ -538,13 +582,15 @@ with gr.Blocks(theme=gr.themes.Soft()) as app:
         btn_exportar_excel_r.click(exportar_excel_resumo, inputs=[filtro_mot, filtro_data], outputs=[arquivo_download])
         btn_exportar_excel_d.click(exportar_excel_detalhado, inputs=[filtro_mot, filtro_data], outputs=[arquivo_download])
         btn_wa.click(gerar_comprovante_whatsapp, inputs=[filtro_mot, filtro_data], outputs=[texto_wa_out])
-        
-        # Ação do novo botão de pagamento
         btn_pagar_caixa.click(pagar_motorista_automatico, inputs=[filtro_mot, filtro_data], outputs=[msg_pagamento])
 
     with gr.Tab("Cadastro de Motoristas"):
+        gr.Markdown("### 👤 Cadastro com Definição de Veículo e Tarifa de Repasse por Pacote")
         with gr.Row():
             nome_in = gr.Textbox(label="Nome Completo")
+            veiculo_in = gr.Dropdown(choices=["Carro", "Moto", "Bicicleta", "Outro"], value="Moto", label="Tipo de Veículo")
+            tarifa_in = gr.Number(label="Tarifa de Repasse por Pacote (R$) - Ex: 2.00", value=2.0)
+        with gr.Row():
             pix_in = gr.Textbox(label="Chave PIX")
             tel_in = gr.Textbox(label="Telefone / WhatsApp")
         
@@ -552,7 +598,7 @@ with gr.Blocks(theme=gr.themes.Soft()) as app:
         msg_mot = gr.Textbox(label="Status", interactive=False)
         tabela_mot = gr.Dataframe(value=carregar_tabela('motoristas'), interactive=False, label="Motoristas Cadastrados")
         
-        btn_mot.click(cadastrar_motorista, inputs=[nome_in, pix_in, tel_in], outputs=[tabela_mot, msg_mot, motorista_carga_in, motorista_in, motorista_dev_in, filtro_mot])
+        btn_mot.click(cadastrar_motorista, inputs=[nome_in, veiculo_in, tarifa_in, pix_in, tel_in], outputs=[tabela_mot, msg_mot, motorista_carga_in, motorista_in, motorista_dev_in, filtro_mot])
 
     with gr.Tab("Cadastro de Bairros"):
         with gr.Row():
