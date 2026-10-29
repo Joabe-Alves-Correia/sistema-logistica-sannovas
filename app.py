@@ -54,7 +54,7 @@ with engine.begin() as conn:
     conn.execute(text('''
         CREATE TABLE IF NOT EXISTS motoristas (
             id SERIAL PRIMARY KEY,
-            nome TEXT,
+            nome TEXT UNIQUE,
             veiculo TEXT,
             tarifa_repasse REAL,
             chave_pix TEXT,
@@ -76,7 +76,6 @@ with engine.begin() as conn:
             valor REAL
         )
     '''))
-    # Migrações e colunas novas em bases existentes
     conn.execute(text("ALTER TABLE entregas ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'Ativo';"))
     conn.execute(text("ALTER TABLE entregas ADD COLUMN IF NOT EXISTS valor_recebido REAL DEFAULT 0.0;"))
     conn.execute(text("ALTER TABLE entregas ADD COLUMN IF NOT EXISTS valor_repasse REAL DEFAULT 0.0;"))
@@ -136,7 +135,6 @@ def calcular_kpis():
     total_entregue = int(df_entregas['pacotes'].sum()) if not df_entregas.empty else 0
     total_devolvido = int(df_devolucoes['pacotes'].sum()) if not df_devolucoes.empty else 0
     
-    # Compatibilidade com colunas antigas ou novas
     col_repasse = 'total_repasse' if 'total_repasse' in df_entregas.columns else 'total'
     col_recebido = 'total_recebido' if 'total_recebido' in df_entregas.columns else 'total'
     
@@ -200,9 +198,7 @@ def registrar_entrega(data, motorista, bairro, pacotes, valor_recebido):
     if not data:
         data = obter_data_hoje()
         
-    # Busca automática da tarifa cadastrada para o motorista
     tarifa_repasse = buscar_tarifa_motorista(motorista)
-    
     total_recebido = pacotes * valor_recebido
     total_repasse = pacotes * tarifa_repasse
     
@@ -244,10 +240,15 @@ def cadastrar_motorista(nome, veiculo, tarifa_repasse, pix, telefone):
         conn.execute(text('''
             INSERT INTO motoristas (nome, veiculo, tarifa_repasse, chave_pix, telefone)
             VALUES (:nome, :veiculo, :tarifa, :pix, :tel)
+            ON CONFLICT (nome) DO UPDATE SET 
+                veiculo = EXCLUDED.veiculo,
+                tarifa_repasse = EXCLUDED.tarifa_repasse,
+                chave_pix = EXCLUDED.chave_pix,
+                telefone = EXCLUDED.telefone
         '''), {"nome": nome, "veiculo": veiculo, "tarifa": float(tarifa_repasse), "pix": pix, "tel": telefone})
     
     novos_motoristas = listar_motoristas()
-    return carregar_tabela('motoristas'), "✅ Motorista cadastrado com sucesso!", gr.update(choices=novos_motoristas), gr.update(choices=novos_motoristas), gr.update(choices=novos_motoristas), gr.update(choices=["Todos"] + novos_motoristas)
+    return carregar_tabela('motoristas'), f"✅ Motorista '{nome}' registado/atualizado com sucesso!", gr.update(choices=novos_motoristas), gr.update(choices=novos_motoristas), gr.update(choices=novos_motoristas), gr.update(choices=["Todos"] + novos_motoristas)
 
 def cadastrar_bairro(nome):
     if not nome:
@@ -261,7 +262,7 @@ def cadastrar_bairro(nome):
         '''), {"nome": nome_limpo})
     
     novos_bairros = listar_bairros()
-    return carregar_tabela('bairros'), "✅ Bairro cadastrado com sucesso!", gr.update(choices=novos_bairros), gr.update(choices=novos_bairros)
+    return carregar_tabela('bairros'), f"✅ Bairro '{nome_limpo}' registado com sucesso!", gr.update(choices=novos_bairros), gr.update(choices=novos_bairros)
 
 def registrar_financeiro(descricao, tipo, valor):
     data = obter_data_hoje()
@@ -330,10 +331,7 @@ def obter_dados_unificados(motorista_filtro, data_filtro):
         params['data'] = f"%{data_filtro}%"
 
     df_c = pd.read_sql_query(text(f"SELECT data, motorista, rota as bairro, pacotes, '1 - Carga (Saída)' as tipo FROM cargas WHERE {cond}"), engine, params=params)
-    
-    # Tratamento para colunas de repasse e recebido
     df_e = pd.read_sql_query(text(f"SELECT data, motorista, bairro, pacotes, total_recebido, total_repasse, '2 - Entrega' as tipo FROM entregas WHERE {cond}"), engine, params=params)
-    
     df_d = pd.read_sql_query(text(f"SELECT data, motorista, bairro, pacotes, motivo, '3 - Devolução' as tipo FROM devolucoes WHERE {cond}"), engine, params=params)
 
     list_dfs = []
@@ -493,14 +491,13 @@ with gr.Blocks(theme=gr.themes.Soft()) as app:
         btn_cancelar_carga.click(cancelar_carga, inputs=[id_cancelar_carga_in], outputs=[tabela_cargas, msg_carga, kpi_box])
 
     with gr.Tab("Controle de Entregas"):
-        gr.Markdown("### 📦 Registo de Sucesso (O repasse ao motorista é calculado automaticamente pelo cadastro dele)")
+        gr.Markdown("### 📦 Registo de Sucesso")
         with gr.Row():
             data_in = gr.Textbox(label="Data (DD/MM/AAAA) - Vazio para hoje")
             motorista_in = gr.Dropdown(choices=listar_motoristas(), label="Motorista")
             bairro_in = gr.Dropdown(choices=listar_bairros(), label="Bairro")
         with gr.Row():
             pacotes_in = gr.Number(label="Quantidade de Pacotes Entregues", value=1, minimum=1)
-            # Alterado para valor recebido por pacote do cliente
             valor_recebido_in = gr.Number(label="Valor Recebido por Pacote do Cliente (R$)", value=0.0)
         
         btn_entrega = gr.Button("Salvar Registo de Entrega", variant="primary")
@@ -585,16 +582,16 @@ with gr.Blocks(theme=gr.themes.Soft()) as app:
         btn_pagar_caixa.click(pagar_motorista_automatico, inputs=[filtro_mot, filtro_data], outputs=[msg_pagamento])
 
     with gr.Tab("Cadastro de Motoristas"):
-        gr.Markdown("### 👤 Cadastro com Definição de Veículo e Tarifa de Repasse por Pacote")
+        gr.Markdown("### 👤 Cadastrar Novo ou Atualizar Dados (Basta digitar o mesmo nome para atualizar)")
         with gr.Row():
             nome_in = gr.Textbox(label="Nome Completo")
             veiculo_in = gr.Dropdown(choices=["Carro", "Moto", "Bicicleta", "Outro"], value="Moto", label="Tipo de Veículo")
-            tarifa_in = gr.Number(label="Tarifa de Repasse por Pacote (R$) - Ex: 2.00", value=2.0)
+            tarifa_in = gr.Number(label="Tarifa de Repasse por Pacote (R$)", value=2.0)
         with gr.Row():
             pix_in = gr.Textbox(label="Chave PIX")
             tel_in = gr.Textbox(label="Telefone / WhatsApp")
         
-        btn_mot = gr.Button("Cadastrar Motorista", variant="primary")
+        btn_mot = gr.Button("Guardar / Atualizar Motorista", variant="primary")
         msg_mot = gr.Textbox(label="Status", interactive=False)
         tabela_mot = gr.Dataframe(value=carregar_tabela('motoristas'), interactive=False, label="Motoristas Cadastrados")
         
