@@ -14,7 +14,7 @@ engine = create_engine(DATABASE_URL)
 USUARIO_ADMIN = os.environ.get("APP_USER", "admin")
 SENHA_ADMIN = os.environ.get("APP_PASS", "Sannovas2026!")
 
-# 3. Inicialização e Migração do Banco de Dados
+# 3. Inicialização e Migração do Banco de Dados (Incluindo Auditoria)
 with engine.begin() as conn:
     conn.execute(text('''
         CREATE TABLE IF NOT EXISTS cargas (
@@ -76,6 +76,16 @@ with engine.begin() as conn:
             valor REAL
         )
     '''))
+    # Tabela de Auditoria / Log de Ações
+    conn.execute(text('''
+        CREATE TABLE IF NOT EXISTS logs_auditoria (
+            id SERIAL PRIMARY KEY,
+            data_hora TEXT,
+            acao TEXT,
+            detalhes TEXT
+        )
+    '''))
+    
     conn.execute(text("ALTER TABLE entregas ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'Ativo';"))
     conn.execute(text("ALTER TABLE entregas ADD COLUMN IF NOT EXISTS valor_recebido REAL DEFAULT 0.0;"))
     conn.execute(text("ALTER TABLE entregas ADD COLUMN IF NOT EXISTS valor_repasse REAL DEFAULT 0.0;"))
@@ -92,6 +102,14 @@ with engine.begin() as conn:
 # 4. Funções Auxiliares e KPIs
 def carregar_tabela(nome_tabela):
     return pd.read_sql_query(f"SELECT * FROM {nome_tabela} ORDER BY id DESC", engine)
+
+def registar_auditoria(acao, detalhes):
+    agora = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+    with engine.begin() as conn:
+        conn.execute(text('''
+            INSERT INTO logs_auditoria (data_hora, acao, detalhes)
+            VALUES (:dh, :acao, :det)
+        '''), {"dh": agora, "acao": acao, "det": detalhes})
 
 def listar_motoristas():
     try:
@@ -167,6 +185,30 @@ def gerar_grafico_bairros():
     except:
         return pd.DataFrame({'bairro': [], 'pacotes': []})
 
+# --- MELHORIA 3: RANKING DE PRODUTIVIDADE DOS MOTORISTAS ---
+def gerar_ranking_motoristas():
+    try:
+        df_e = carregar_tabela('entregas')
+        df_d = carregar_tabela('devolucoes')
+        
+        if not df_e.empty and 'status' in df_e.columns:
+            df_e = df_e[df_e['status'] != 'Cancelado']
+        if not df_d.empty and 'status' in df_d.columns:
+            df_d = df_d[df_d['status'] != 'Cancelado']
+            
+        g_e = df_e.groupby('motorista', as_index=False)['pacotes'].sum().rename(columns={'pacotes': 'Entregues'}) if not df_e.empty else pd.DataFrame(columns=['motorista', 'Entregues'])
+        g_d = df_d.groupby('motorista', as_index=False)['pacotes'].sum().rename(columns={'pacotes': 'Devolvidos'}) if not df_d.empty else pd.DataFrame(columns=['motorista', 'Devolvidos'])
+        
+        if g_e.empty and g_d.empty:
+            return pd.DataFrame(columns=['Motorista', 'Entregues', 'Devolvidos'])
+            
+        ranking = pd.merge(g_e, g_d, on='motorista', how='outer').fillna(0)
+        ranking.sort_values(by='Entregues', ascending=False, inplace=True)
+        ranking.columns = ['Motorista', 'Entregues', 'Devolvidos']
+        return ranking
+    except:
+        return pd.DataFrame(columns=['Motorista', 'Entregues', 'Devolvidos'])
+
 def obter_data_hoje():
     return datetime.now().strftime("%d/%m/%Y")
 
@@ -186,6 +228,7 @@ def registrar_carga(data, motorista, pacotes, rota):
             VALUES (:data, :mot, :pac, :rota, 'Ativo')
         '''), {"data": data, "mot": motorista, "pac": int(pacotes), "rota": rota})
         
+    registar_auditoria("Carga Registada", f"Saída de {pacotes} pacotes para {motorista} (Rota: {rota})")
     return carregar_tabela('cargas'), f"✅ Saída de {pacotes} pacotes registada para {motorista}!", calcular_kpis()
 
 def registrar_entrega(data, motorista, bairro, pacotes, valor_recebido):
@@ -212,6 +255,7 @@ def registrar_entrega(data, motorista, bairro, pacotes, valor_recebido):
             "tot_rec": total_recebido, "tot_rep": total_repasse
         })
     
+    registar_auditoria("Entrega Registada", f"{pacotes} pacotes entregues por {motorista} em {bairro}")
     return carregar_tabela('entregas'), f"✅ Salvo! Recebido: R$ {total_recebido:.2f} | Repasse (R$ {tarifa_repasse:.2f}/un): R$ {total_repasse:.2f}", calcular_kpis(), gerar_grafico_bairros()
 
 def registrar_devolucao(data, motorista, bairro, pacotes, motivo):
@@ -230,6 +274,7 @@ def registrar_devolucao(data, motorista, bairro, pacotes, motivo):
             VALUES (:data, :mot, :bai, :pac, :motivo, 'Ativo')
         '''), {"data": data, "mot": motorista, "bai": bairro, "pac": pacotes, "motivo": motivo})
     
+    registar_auditoria("Devolução Registada", f"{pacotes} pacotes devolvidos por {motorista} ({motivo})")
     return carregar_tabela('devolucoes'), f"✅ Devolução registada ({pacotes} pacotes)!", calcular_kpis()
 
 def cadastrar_motorista(nome, veiculo, tarifa_repasse, pix, telefone):
@@ -245,12 +290,14 @@ def cadastrar_motorista(nome, veiculo, tarifa_repasse, pix, telefone):
                 WHERE nome ILIKE :nome
             '''), {"nome": nome_limpo, "veiculo": veiculo, "tarifa": float(tarifa_repasse), "pix": pix, "tel": telefone})
             msg = f"✅ Motorista '{nome_limpo}' atualizado com sucesso!"
+            registar_auditoria("Motorista Atualizado", f"Dados atualizados para {nome_limpo}")
         else:
             conn.execute(text('''
                 INSERT INTO motoristas (nome, veiculo, tarifa_repasse, chave_pix, telefone)
                 VALUES (:nome, :veiculo, :tarifa, :pix, :tel)
             '''), {"nome": nome_limpo, "veiculo": veiculo, "tarifa": float(tarifa_repasse), "pix": pix, "tel": telefone})
             msg = f"✅ Motorista '{nome_limpo}' cadastrado com sucesso!"
+            registar_auditoria("Novo Motorista", f"Cadastrado: {nome_limpo}")
     
     novos_motoristas = listar_motoristas()
     return carregar_tabela('motoristas'), msg, gr.update(choices=novos_motoristas), gr.update(choices=novos_motoristas), gr.update(choices=novos_motoristas), gr.update(choices=["Todos"] + novos_motoristas)
@@ -261,6 +308,7 @@ def apagar_motorista(id_motorista):
     try:
         with engine.begin() as conn:
             conn.execute(text("DELETE FROM motoristas WHERE id = :id"), {"id": int(id_motorista)})
+        registar_auditoria("Motorista Apagado", f"ID do motorista removido: {id_motorista}")
         novos_motoristas = listar_motoristas()
         return carregar_tabela('motoristas'), f"🗑️ Motorista #{id_motorista} apagado com sucesso!", gr.update(choices=novos_motoristas), gr.update(choices=novos_motoristas), gr.update(choices=novos_motoristas), gr.update(choices=["Todos"] + novos_motoristas)
     except Exception as e:
@@ -277,6 +325,7 @@ def cadastrar_bairro(nome):
             ON CONFLICT (nome) DO NOTHING
         '''), {"nome": nome_limpo})
     
+    registar_auditoria("Bairro Cadastrado", f"Bairro: {nome_limpo}")
     novos_bairros = listar_bairros()
     return carregar_tabela('bairros'), f"✅ Bairro '{nome_limpo}' registado com sucesso!", gr.update(choices=novos_bairros), gr.update(choices=novos_bairros)
 
@@ -288,6 +337,7 @@ def registrar_financeiro(descricao, tipo, valor):
             VALUES (:data, :desc, :tipo, :val)
         '''), {"data": data, "desc": descricao, "tipo": tipo, "val": valor})
     
+    registar_auditoria("Financeiro Manual", f"Lançamento {tipo}: R$ {valor} ({descricao})")
     return carregar_tabela('financeiro'), "✅ Lançamento salvo!", calcular_kpis()
 
 def pagar_motorista_automatico(motorista_nome, data_consulta):
@@ -312,6 +362,7 @@ def pagar_motorista_automatico(motorista_nome, data_consulta):
             VALUES (:data, :desc, 'Saída', :val)
         '''), {"data": data_consulta, "desc": descricao, "val": total_repasse})
         
+    registar_auditoria("Pagamento Automático Caixa", f"Repasse de R$ {total_repasse:.2f} para {motorista_nome}")
     return f"✅ Pagamento de R$ {total_repasse:.2f} registado com sucesso no Fluxo de Caixa!"
 
 def cancelar_carga(id_registro):
@@ -319,6 +370,7 @@ def cancelar_carga(id_registro):
         return carregar_tabela('cargas'), "❌ Informe o ID!", calcular_kpis()
     with engine.begin() as conn:
         conn.execute(text("UPDATE cargas SET status = 'Cancelado' WHERE id = :id"), {"id": int(id_registro)})
+    registar_auditoria("Carga Cancelada", f"ID de carga cancelado: {id_registro}")
     return carregar_tabela('cargas'), f"⚠️ Carga #{id_registro} marcada como Cancelada.", calcular_kpis()
 
 def cancelar_registro(id_registro):
@@ -326,6 +378,7 @@ def cancelar_registro(id_registro):
         return carregar_tabela('entregas'), "❌ Informe o ID da entrega!", calcular_kpis(), gerar_grafico_bairros()
     with engine.begin() as conn:
         conn.execute(text("UPDATE entregas SET status = 'Cancelado' WHERE id = :id"), {"id": int(id_registro)})
+    registar_auditoria("Entrega Cancelada", f"ID de entrega cancelado: {id_registro}")
     return carregar_tabela('entregas'), f"⚠️ Registo #{id_registro} marcado como Cancelado.", calcular_kpis(), gerar_grafico_bairros()
 
 def cancelar_devolucao(id_registro):
@@ -333,6 +386,7 @@ def cancelar_devolucao(id_registro):
         return carregar_tabela('devolucoes'), "❌ Informe o ID da devolução!", calcular_kpis()
     with engine.begin() as conn:
         conn.execute(text("UPDATE devolucoes SET status = 'Cancelado' WHERE id = :id"), {"id": int(id_registro)})
+    registar_auditoria("Devolução Cancelada", f"ID de devolução cancelado: {id_registro}")
     return carregar_tabela('devolucoes'), f"⚠️ Devolução #{id_registro} marcada como Cancelada.", calcular_kpis()
 
 # 6. Unificação e Exportações
@@ -440,6 +494,7 @@ def fazer_backup_geral():
         carregar_tabela('motoristas').to_excel(writer, sheet_name="Motoristas", index=False)
         carregar_tabela('bairros').to_excel(writer, sheet_name="Bairros", index=False)
         carregar_tabela('financeiro').to_excel(writer, sheet_name="Financeiro", index=False)
+        carregar_tabela('logs_auditoria').to_excel(writer, sheet_name="Auditoria", index=False)
     return caminho
 
 def gerar_comprovante_whatsapp(motorista_nome, data_consulta):
@@ -480,7 +535,7 @@ def gerar_comprovante_whatsapp(motorista_nome, data_consulta):
 _Conferido pelo Sistema SanNovas._"""
     return texto_whatsapp
 
-# 7. Interface Gráfica (Gradiated)
+# 7. Interface Gráfica (Gradio)
 with gr.Blocks(theme=gr.themes.Soft()) as app:
     gr.Markdown("# 📦 SanNovas - Controle")
     
@@ -566,6 +621,9 @@ with gr.Blocks(theme=gr.themes.Soft()) as app:
         tabela_resumo = gr.Dataframe(label="📊 Resumo Consolidado", interactive=False)
         tabela_detalhada = gr.Dataframe(label="📝 Histórico Detalhado Unificado", interactive=False)
         
+        gr.Markdown("### 🏆 Ranking de Produtividade dos Motoristas")
+        tabela_ranking = gr.Dataframe(value=gerar_ranking_motoristas(), label="Ranking por Volume de Entregas e Devoluções", interactive=False)
+        
         gr.Markdown("### 📈 Volume de Pacotes por Bairro (Apenas Sucessos)")
         grafico_out = gr.BarPlot(
             value=gerar_grafico_bairros(),
@@ -597,6 +655,12 @@ with gr.Blocks(theme=gr.themes.Soft()) as app:
         btn_wa.click(gerar_comprovante_whatsapp, inputs=[filtro_mot, filtro_data], outputs=[texto_wa_out])
         btn_pagar_caixa.click(pagar_motorista_automatico, inputs=[filtro_mot, filtro_data], outputs=[msg_pagamento])
 
+    with gr.Tab("Auditoria & Logs"):
+        gr.Markdown("### 📋 Histórico de Alterações e Ações Críticas no Sistema")
+        tabela_auditoria = gr.Dataframe(value=carregar_tabela('logs_auditoria'), interactive=False, label="Registo de Auditoria")
+        btn_atualizar_logs = gr.Button("🔄 Atualizar Lista de Logs", variant="secondary")
+        btn_atualizar_logs.click(lambda: carregar_tabela('logs_auditoria'), outputs=[tabela_auditoria])
+
     with gr.Tab("Cadastro de Motoristas"):
         gr.Markdown("### 👤 Cadastrar / Atualizar / Apagar Motoristas")
         with gr.Row():
@@ -615,7 +679,7 @@ with gr.Blocks(theme=gr.themes.Soft()) as app:
             btn_apagar_mot = gr.Button("🗑️ Apagar Motorista por ID", variant="stop")
             
         msg_mot = gr.Textbox(label="Status", interactive=False)
-        tabela_mot = gr.Dataframe(value=carregar_tabela('motoristas'), interactive=False, label="Motoristas Cadastrados (Veja o ID aqui)")
+        tabela_mot = gr.Dataframe(value=carregar_tabela('motoristas'), interactive=False, label="Motoristas Cadastrados")
         
         btn_mot.click(cadastrar_motorista, inputs=[nome_in, veiculo_in, tarifa_in, pix_in, tel_in], outputs=[tabela_mot, msg_mot, motorista_carga_in, motorista_in, motorista_dev_in, filtro_mot])
         btn_apagar_mot.click(apagar_motorista, inputs=[id_apagar_mot_in], outputs=[tabela_mot, msg_mot, motorista_carga_in, motorista_in, motorista_dev_in, filtro_mot])
@@ -638,7 +702,7 @@ with gr.Blocks(theme=gr.themes.Soft()) as app:
         
         with gr.Row():
             btn_fin = gr.Button("Salvar Lançamento", variant="primary")
-            btn_backup = gr.Button("📥 Baixar Backup Geral (Todas as Tabelas)", variant="secondary")
+            btn_backup = gr.Button("📥 Baixar Backup Geral (Com Aba de Auditoria)", variant="secondary")
             
         msg_fin = gr.Textbox(label="Status", interactive=False)
         tabela_fin = gr.Dataframe(value=carregar_tabela('financeiro'), interactive=False, label="Fluxo de Caixa")
